@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::str::FromStr;
 
 // Metadata about outbound edges for a node in the 11 node board graph.
@@ -67,7 +68,7 @@ const BOARD_GRAPH: [PositionNode; 11] = [
 
 const NUM_SPHERE_COLORS: usize = 5;
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum SphereColor {
+enum Color {
     Black,
     White,
     Blue,
@@ -75,22 +76,106 @@ enum SphereColor {
     Orange,
 }
 
+impl TryFrom<u8> for Color {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            b'K' => Ok(Color::Black),
+            b'W' => Ok(Color::White),
+            b'B' => Ok(Color::Blue),
+            b'O' => Ok(Color::Orange),
+            b'G' => Ok(Color::Green),
+            _ => Err("Not a valid Color. Must be in [KWBOG]"),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Constraint {
-    // All spheres of these two colors must be adjacent to one another.
-    Adjacent(SphereColor, SphereColor),
-    // All spheres of these two colors may not be adjacent to one another.
-    NonAdjacent(SphereColor, SphereColor),
-    // Exactly N of the specified color.
-    Count(usize, SphereColor),
-    // Exactly N of the sum of these two colors.
-    SumCount(usize, SphereColor, SphereColor),
-    // Spheres of this color must be below other spheres (must not be on top!)
-    Below(SphereColor),
-    // Spheres of this color must be above other spheres (must not be underneath!)
-    Above(SphereColor),
-    // There must be more spheres of the first color than the second.
-    GreaterThan(SphereColor, SphereColor),
+    // All spheres of these two colors must be adjacent to one another. Fmt: C1|C2
+    Adjacent(Color, Color),
+    // All spheres of these two colors may not be adjacent to one another. Fmt: C1XC2
+    NotAdjacent(Color, Color),
+    // Exactly N of the specified color. Fmt: CNC
+    Count(usize, Color),
+    // Exactly N of the sum of these two colors. Fmt: C1NC2
+    SumCount(usize, Color, Color),
+    // Spheres of this color must be below other spheres (must not be on top!) Fmt: */C
+    Below(Color),
+    // Spheres of this color must be above other spheres (must not be underneath!) Fmt: C/*
+    Above(Color),
+    // There must be more spheres of the first color than the second. Fmt: C1>C2
+    GreaterThan(Color, Color),
+}
+
+fn parse_two_colors(one: u8, two: u8) -> Result<(Color, Color), &'static str> {
+    let c1 = Color::try_from(one);
+    if c1.is_err() {
+        return Err(c1.err().unwrap());
+    }
+    let c2 = Color::try_from(two);
+    if c2.is_err() {
+        return Err(c2.err().unwrap());
+    }
+    return Ok((c1.unwrap(), c2.unwrap()));
+}
+
+impl FromStr for Constraint {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 3 {
+            return Err("constraints are 3 characters long");
+        }
+
+        let v: Vec<u8> = s.bytes().collect();
+        match v[1] {
+            b'|' => match parse_two_colors(v[0], v[2]) {
+                Ok((c1, c2)) => Ok(Constraint::Adjacent(c1, c2)),
+                Err(e) => Err(e),
+            },
+            b'x' => match parse_two_colors(v[0], v[2]) {
+                Ok((c1, c2)) => Ok(Constraint::NotAdjacent(c1, c2)),
+                Err(e) => Err(e),
+            },
+            b'1'..=b'6' => {
+                let n = v[1] - b'0';
+                match parse_two_colors(v[0], v[2]) {
+                    Ok((c1, c2)) => {
+                        if c1 != c2 {
+                            Ok(Constraint::SumCount(n as usize, c1, c2))
+                        } else if n <= 3 {
+                            Ok(Constraint::Count(n as usize, c1))
+                        } else {
+                            Err("unknown constraint operator")
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            b'/' => {
+                if v[0] == b'*' {
+                    match Color::try_from(v[2]) {
+                        Ok(c) => Ok(Constraint::Below(c)),
+                        Err(e) => Err(e),
+                    }
+                } else if v[2] == b'*' {
+                    match Color::try_from(v[0]) {
+                        Ok(c) => Ok(Constraint::Above(c)),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    Err("below/above constraints must have exactly one wildcard [*]")
+                }
+            }
+            b'>' => match parse_two_colors(v[0], v[2]) {
+                Ok((c1, c2)) => Ok(Constraint::GreaterThan(c1, c2)),
+                Err(e) => Err(e),
+            },
+            _ => Err("unknown constraint operator"),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -114,18 +199,18 @@ impl ColorInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct BoardStateAnalysis {
     // Information broken down per-color.
     colors: [ColorInfo; NUM_SPHERE_COLORS],
     // Bitmap of set positions.
     positions: u16,
-    // Bitmap of all positions below any set positions.
+    // Bitmap of all positions below set positions.
     below: u16,
 }
 
 impl BoardStateAnalysis {
-    fn new(state: &[Option<SphereColor>; BOARD_GRAPH.len()]) -> BoardStateAnalysis {
+    fn new(state: &[Option<Color>; BOARD_GRAPH.len()]) -> BoardStateAnalysis {
         let mut r = BoardStateAnalysis {
             colors: [ColorInfo::default(); NUM_SPHERE_COLORS],
             positions: 0,
@@ -148,14 +233,14 @@ impl BoardStateAnalysis {
         self.positions.count_ones() as usize
     }
 
-    fn color(&self, c: SphereColor) -> &ColorInfo {
+    fn color(&self, c: Color) -> &ColorInfo {
         return &self.colors[c as usize];
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct BoardState {
-    positions: [Option<SphereColor>; BOARD_GRAPH.len()],
+    positions: [Option<Color>; BOARD_GRAPH.len()],
     analysis: Option<BoardStateAnalysis>,
 }
 
@@ -169,13 +254,18 @@ struct BoardScore {
 
 impl BoardState {
     // Returns false is this configuration is not valid (physically possible).
+    // TODO(trevorm): return Result<(), &'static str> to get better error messages.
     pub fn is_valid(&mut self) -> bool {
         if self.analysis.is_none() {
             self.analysis = Some(BoardStateAnalysis::new(&self.positions));
         }
         // Every position that is below another position *must* be set.
         let analysis: &BoardStateAnalysis = self.analysis.as_ref().unwrap();
-        return analysis.positions & analysis.below == analysis.below;
+        if analysis.positions & analysis.below != analysis.below {
+            false
+        } else {
+            analysis.colors.iter().all(|&c| c.count() <= 3)
+        }
     }
 
     pub fn score(&mut self, constraints: &[Constraint]) -> BoardScore {
@@ -212,7 +302,7 @@ impl BoardState {
                 c1.positions & c2.adjacent == c1.positions
                     && c2.positions & c1.adjacent == c2.positions
             }
-            Constraint::NonAdjacent(color1, color2) => {
+            Constraint::NotAdjacent(color1, color2) => {
                 let c1 = analysis.color(*color1);
                 let c2 = analysis.color(*color2);
                 c1.positions & !c2.adjacent == c1.positions
@@ -234,79 +324,39 @@ impl BoardState {
     }
 }
 
-#[derive(Debug)]
-enum ParseBoardStateError {
-    // Use a single character to represent each possible value of Option<SphereColor>
-    // K = Some(Black)
-    // W = Some(White)
-    // B = Some(Blue)
-    // G = Some(Green)
-    // O = Some(Orange)
-    // E = None
-    // Any other value is invalid.
-    InvalidSphereColor,
-    // May have no more than BOARD_GRAPH.len() values.
-    TooLong,
-}
-
-// TODO(trevorm): test for BoardState::FromStr()
 impl FromStr for BoardState {
-    type Err = ParseBoardStateError;
+    type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.len() > BOARD_GRAPH.len() {
-            return Err(ParseBoardStateError::TooLong);
+            return Err("cannot fill more than 11 places");
         }
 
         // NB: if there are less than BOARD_GRAPH.len() characters, the rest are empty.
-        let mut values: [Option<SphereColor>; BOARD_GRAPH.len()] = [None; BOARD_GRAPH.len()];
-        for (i, c) in s.chars().enumerate() {
-            match c {
-                'K' => values[i] = Some(SphereColor::Black),
-                'W' => values[i] = Some(SphereColor::White),
-                'B' => values[i] = Some(SphereColor::Blue),
-                'G' => values[i] = Some(SphereColor::Green),
-                'O' => values[i] = Some(SphereColor::Orange),
-                'E' => values[i] = None,
-                _ => return Err(ParseBoardStateError::InvalidSphereColor),
+        let mut values: [Option<Color>; BOARD_GRAPH.len()] = [None; BOARD_GRAPH.len()];
+        for (i, c) in s.bytes().enumerate() {
+            let r = Color::try_from(c);
+            if r.is_ok() {
+                values[i] = r.ok()
+            } else if c != b'.' {
+                return Err("invalid place must be in [KWBOG.]");
             }
         }
 
-        Ok(BoardState {
+        let mut state = BoardState {
             positions: values,
             analysis: None,
-        })
+        };
+        if state.is_valid() {
+            Ok(state)
+        } else {
+            Err("parsed board state is not valid")
+        }
     }
 }
 
-// TODO(trevorm): ~ddt using macros.
-// TODO(trevorm): tests for BoardScore.flag
-// TODO(trevorm): more complex constraint tests.
 mod test {
     use super::*;
-
-    struct BitVector {
-        v: u64,
-    }
-
-    impl BitVector {
-        fn new(v: u64) -> BitVector {
-            BitVector { v: v }
-        }
-    }
-
-    impl Iterator for BitVector {
-        type Item = usize;
-        fn next(&mut self) -> Option<Self::Item> {
-            let r = self.v.trailing_zeros();
-            if r == 64 {
-                None
-            } else {
-                self.v = self.v & !(1 << r);
-                Some(r as usize)
-            }
-        }
-    }
 
     #[test]
     fn validate_board_graph() {
@@ -315,130 +365,291 @@ mod test {
             let node_mask: u16 = 1 << i;
             assert_eq!(pos.adjacent & node_mask, 0);
             assert_eq!(pos.below & node_mask, 0);
-            for b in BitVector::new(pos.below as u64) {
+            let mut below = pos.below;
+            while below > 0 {
+                let b = below.trailing_zeros();
                 assert_eq!(pos.adjacent & (1 << b), 1 << b);
+                below &= !(1 << b);
             }
         }
     }
 
-    #[test]
-    fn is_valid() {
-        fn valid(s: &str) -> bool {
-            BoardState::from_str(s).expect("f").is_valid()
+    mod constraint_from_str {
+        #[allow(unused_imports)]
+        use super::*;
+
+        macro_rules! test {
+            ($name: ident, $s: expr, $c: expr) => {
+                #[test]
+                fn $name() {
+                    assert_eq!(Constraint::from_str($s), $c);
+                }
+            };
         }
 
-        assert!(valid("WWWB"));
-        assert!(!valid("EWWWBBBGGG"));
-        assert!(valid("KWWWBBBGGG"));
-        assert!(valid("KWWWBBBGGGO"));
-        assert!(!valid("KWWWBBBEEEO"));
+        test!(
+            adjacent1,
+            "K|W",
+            Ok(Constraint::Adjacent(Color::Black, Color::White))
+        );
+        test!(
+            adjacent2,
+            "W|B",
+            Ok(Constraint::Adjacent(Color::White, Color::Blue))
+        );
+        test!(
+            adjacent3,
+            "O|G",
+            Ok(Constraint::Adjacent(Color::Orange, Color::Green))
+        );
+        test!(
+            not_adjacent1,
+            "KxW",
+            Ok(Constraint::NotAdjacent(Color::Black, Color::White))
+        );
+        test!(
+            not_adjacent2,
+            "WxB",
+            Ok(Constraint::NotAdjacent(Color::White, Color::Blue))
+        );
+        test!(
+            not_adjacent3,
+            "OxG",
+            Ok(Constraint::NotAdjacent(Color::Orange, Color::Green))
+        );
+        test!(count1, "K1K", Ok(Constraint::Count(1, Color::Black)));
+        test!(count2, "W2W", Ok(Constraint::Count(2, Color::White)));
+        test!(count3, "O3O", Ok(Constraint::Count(3, Color::Orange)));
+        test!(count_0, "G0G", Err("unknown constraint operator"));
+        test!(count_4, "G4G", Err("unknown constraint operator"));
+        test!(
+            sum_count1,
+            "K1W",
+            Ok(Constraint::SumCount(1, Color::Black, Color::White))
+        );
+        test!(
+            sum_count4,
+            "B4O",
+            Ok(Constraint::SumCount(4, Color::Blue, Color::Orange))
+        );
+        test!(
+            sum_count5,
+            "G5B",
+            Ok(Constraint::SumCount(5, Color::Green, Color::Blue))
+        );
+        test!(
+            sum_count6,
+            "G6O",
+            Ok(Constraint::SumCount(6, Color::Green, Color::Orange))
+        );
+        test!(sum_count0, "K0W", Err("unknown constraint operator"));
+        test!(sum_count7, "K7W", Err("unknown constraint operator"));
+        test!(below1, "*/K", Ok(Constraint::Below(Color::Black)));
+        test!(below2, "*/O", Ok(Constraint::Below(Color::Orange)));
+        test!(above1, "W/*", Ok(Constraint::Above(Color::White)));
+        test!(above2, "G/*", Ok(Constraint::Above(Color::Green)));
+        test!(
+            above_below_invalid,
+            "B/W",
+            Err("below/above constraints must have exactly one wildcard [*]")
+        );
+        test!(not_an_operator, "K-W", Err("unknown constraint operator"));
     }
 
-    fn score(s: &str, constraints: &[Constraint]) -> BoardScore {
-        BoardState::from_str(s).expect("f").score(&constraints)
+    mod board_state_from_str {
+        #[allow(unused_imports)]
+        use super::*;
+        macro_rules! test {
+            ($name: ident, $s: expr, $($c:expr),*) => {
+                #[test]
+                fn $name() {
+                    let mut positions: [Option<Color>; BOARD_GRAPH.len()] = [None; BOARD_GRAPH.len()];
+                    let mut p = 0;
+                    $(
+                        #[allow(unused_assignments)]
+                        {
+                            assert!(p < BOARD_GRAPH.len());
+                            positions[p] = $c;
+                            p = p + 1;
+                        }
+                    )*
+                    assert_eq!(BoardState::from_str($s).unwrap().positions, positions, "input={} actual={:?}", $s, positions);
+                }
+            }
+        }
+        test!(black, "K", Some(Color::Black));
+        test!(white, "W", Some(Color::White));
+        test!(blue, "B", Some(Color::Blue));
+        test!(green, "G", Some(Color::Green));
+        test!(orange, "O", Some(Color::Orange));
+        test!(empty, ".O", None, Some(Color::Orange));
+        test!(
+            eleven,
+            "KWWWBBBGGGO",
+            Some(Color::Black),
+            Some(Color::White),
+            Some(Color::White),
+            Some(Color::White),
+            Some(Color::Blue),
+            Some(Color::Blue),
+            Some(Color::Blue),
+            Some(Color::Green),
+            Some(Color::Green),
+            Some(Color::Green),
+            Some(Color::Orange)
+        );
+
+        #[test]
+        fn invalid_color() {
+            assert_eq!(
+                BoardState::from_str("X"),
+                Err("invalid place must be in [KWBOG.]")
+            )
+        }
+
+        #[test]
+        fn too_long() {
+            assert_eq!(
+                BoardState::from_str("KKKWWWOOOGGG"),
+                Err("cannot fill more than 11 places")
+            )
+        }
+
+        #[test]
+        fn missing_l0() {
+            assert_eq!(
+                BoardState::from_str(".KKKWWWOOOG"),
+                Err("parsed board state is not valid")
+            )
+        }
+
+        #[test]
+        fn missing_l1() {
+            assert_eq!(
+                BoardState::from_str("OKKKWWW...G"),
+                Err("parsed board state is not valid")
+            )
+        }
+
+        #[test]
+        fn color_limit3() {
+            assert_eq!(
+                BoardState::from_str("OKKKWWWBBBK"),
+                Err("parsed board state is not valid")
+            )
+        }
     }
 
-    #[test]
-    fn adjacent_constraint() {
-        let constraints = [Constraint::Adjacent(SphereColor::Black, SphereColor::White)];
+    mod board_state_valid {
+        #[allow(unused_imports)]
+        use super::*;
+        macro_rules! test {
+            ($name: ident, $s: expr) => {
+                #[test]
+                fn $name() {
+                    assert_eq!(BoardState::from_str($s).unwrap().is_valid(), true);
+                }
+            };
+        }
 
-        assert_eq!(score("EKWKWKW", &constraints).score, 6);
-        assert_eq!(score("GKWKWKGOOOW", &constraints).score, 9);
+        test!(short_stack, "WWWB");
+        test!(ten_stack, "KWWWBBBGGG");
+        test!(eleven_stack, "KWWWBBBGGGO");
     }
 
-    #[test]
-    fn non_adjacent_constraint() {
-        let constraints = [Constraint::NonAdjacent(
-            SphereColor::Black,
-            SphereColor::White,
-        )];
+    mod board_state_score {
+        use super::*;
+        #[allow(dead_code)]
+        fn parse_constraints(s: &str) -> Result<Vec<Constraint>, String> {
+            let mut out = Vec::<Constraint>::new();
+            if s.is_empty() {
+                return Ok(out);
+            }
+            for x in s.split(',') {
+                match Constraint::from_str(x) {
+                    Ok(c) => out.push(c),
+                    Err(e) => {
+                        let f: String = format!("Could not parse constraint {}: {}", x, e);
+                        return Err(f);
+                    }
+                }
+            }
+            Ok(out)
+        }
 
-        assert_eq!(score("EKWKWKW", &constraints).score, 4);
-        assert_eq!(score("GKKEWW", &constraints).score, 5);
-    }
+        macro_rules! test {
+            ($name:ident, $s:expr, $c:expr, $score:expr) => {
+                #[test]
+                fn $name() {
+                    let state = BoardState::from_str($s);
+                    let constraints = parse_constraints($c);
+                    assert_eq!(state.unwrap().score(&constraints.unwrap()).score, $score);
+                }
+            };
+            ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
+                #[test]
+                fn $name() {
+                    let state = BoardState::from_str($s);
+                    let constraints = parse_constraints($c);
+                    assert_eq!(
+                        state.unwrap().score(&constraints.unwrap()),
+                        BoardScore {
+                            score: $score,
+                            flag: $flag
+                        }
+                    );
+                }
+            };
+        }
 
-    #[test]
-    fn count_constraint() {
-        let constraints = [Constraint::Count(2, SphereColor::Blue)];
-
-        assert_eq!(score("B", &constraints).score, 0);
-        assert_eq!(score("BK", &constraints).score, 0);
-        assert_eq!(score("BKK", &constraints).score, 1);
-        assert_eq!(score("BKKB", &constraints).score, 4);
-        assert_eq!(score("BKKBB", &constraints).score, 3);
-    }
-
-    #[test]
-    fn sum_count_constraint() {
-        let constraints = [Constraint::SumCount(
-            2,
-            SphereColor::Blue,
-            SphereColor::Black,
-        )];
-
-        assert_eq!(score("B", &constraints).score, 0);
-        assert_eq!(score("BK", &constraints).score, 2);
-        assert_eq!(score("BKW", &constraints).score, 3);
-        assert_eq!(score("BKWB", &constraints).score, 2);
-        assert_eq!(score("BKWK", &constraints).score, 2);
-    }
-
-    #[test]
-    fn below_constraint() {
-        let constraints = [Constraint::Below(SphereColor::White)];
-
-        // All on the bottom, nothing below.
-        assert_eq!(score("WWW", &constraints).score, 1);
-        // Blue spheres on top of them.
-        assert_eq!(score("WWWEEEEB", &constraints).score, 4);
-        // Blue spheres on top of most of the white spheres.
-        assert_eq!(score("KWWWEEEB", &constraints).score, 3);
-        // White spheres on the very top!
-        assert_eq!(score("WBBBKKKOOOW", &constraints).score, 9);
-        // White spheres on the level 1
-        assert_eq!(score("GBBBKKKWWW", &constraints).score, 8);
-    }
-
-    #[test]
-    fn above_constraint() {
-        let constraints = [Constraint::Above(SphereColor::White)];
-
-        // All on the bottom but nothing above.
-        assert_eq!(score("WWW", &constraints).score, 3);
-        // Blue sphere on top of them.
-        assert_eq!(score("WWWEEEEB", &constraints).score, 2);
-        // Blue sphere on top of most of the white spheres.
-        assert_eq!(score("KWWWEEEB", &constraints).score, 3);
-        // White sphere on the very top! But some still on the bottom.
-        assert_eq!(score("WBBBKKKOOOW", &constraints).score, 9);
-        // White sphere on the top.
-        assert_eq!(score("GBBBKKKOOOW", &constraints).score, 11);
-        // White spheres on level 1.
-        assert_eq!(score("GBBBKKKWWW", &constraints).score, 10);
-    }
-
-    #[test]
-    fn greater_than_constraint() {
-        let constraints = [Constraint::GreaterThan(
-            SphereColor::Green,
-            SphereColor::Orange,
-        )];
-
-        assert_eq!(score("G", &constraints).score, 1);
-        assert_eq!(score("GW", &constraints).score, 2);
-        assert_eq!(score("GWO", &constraints).score, 1);
-        assert_eq!(score("GWOO", &constraints).score, 2);
-        assert_eq!(score("GWOOG", &constraints).score, 3);
-        assert_eq!(score("GWOOGG", &constraints).score, 6);
+        test!(adjacent1, ".KWKWKW", "K|W", 6);
+        test!(adjacent2, ".KWKWKW", "W|K", 6);
+        test!(adjacent3, "GKWKWKGOOOW", "K|W", 9);
+        test!(adjacent4, "GKWKWKGOOOW", "W|K", 9);
+        test!(not_adjacent1, ".KWKWKW", "KxW", 4);
+        test!(not_adjacent2, ".KWKWKW", "WxK", 4);
+        test!(not_adjacent3, "GKK.WW", "KxW", 5);
+        test!(not_adjacent4, "GKK.WW", "WxK", 5);
+        test!(count1, "B", "B2B", 0);
+        test!(count2, "BK", "B2B", 0);
+        test!(count3, "BKK", "B2B", 1);
+        test!(count4, "BKKB", "B2B", 4);
+        test!(count5, "BKKBB", "B2B", 3);
+        test!(sum_count1, "B", "B2K", 0);
+        test!(sum_count2, "BK", "B2K", 2);
+        test!(sum_count3, "BKW", "B2K", 3);
+        test!(sum_count4, "BKWB", "B2K", 2);
+        test!(sum_count5, "BKWK", "B2K", 2);
+        test!(sum_count6, "BKW", "K2B", 3);
+        test!(below1, "WWW", "*/W", 1);
+        test!(below2, "WWW....B", "*/W", 4);
+        test!(below3, "KWWW...B", "*/W", 3);
+        test!(below4, "WBBBKKKOOOW", "*/W", 9);
+        test!(below5, "GBBBKKKWWW", "*/W", 8);
+        test!(above1, "WWW", "W/*", 3);
+        test!(above2, "WWW....B", "W/*", 2);
+        test!(above3, "KWWW...B", "W/*", 3);
+        test!(above4, "WBBBKKKOOOW", "W/*", 9);
+        test!(above5, "GBBBKKKOOOW", "W/*", 11);
+        test!(above6, "GBBBKKKWWW", "W/*", 10);
+        test!(greater_than1, "G", "G>O", 1);
+        test!(greater_than2, "GW", "G>O", 2);
+        test!(greater_than3, "GWO", "G>O", 1);
+        test!(greater_than4, "GWOO", "G>O", 2);
+        test!(greater_than5, "GWOOG", "G>O", 3);
+        test!(greater_than6, "GWOOGG", "G>O", 6);
+        test!(flag_trivial, "KWBOG", "", 5, true);
+        test!(flag_constraint, "KWBOG", "K1K", 5, true);
     }
 }
 
 fn main() {
     println!(
-        "Option<SphereColor>={} BoardState={} positions={} analysis={}",
-        std::mem::size_of::<Option<SphereColor>>(),
+        "Option<Color>={} BoardState={} positions={} analysis={}, ColorInfo={}",
+        std::mem::size_of::<Option<Color>>(),
         std::mem::size_of::<BoardState>(),
-        std::mem::size_of::<[Option<SphereColor>; BOARD_GRAPH.len()]>(),
+        std::mem::size_of::<[Option<Color>; BOARD_GRAPH.len()]>(),
         std::mem::size_of::<Option<BoardStateAnalysis>>(),
+        std::mem::size_of::<ColorInfo>(),
     );
 }
