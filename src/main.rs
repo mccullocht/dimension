@@ -1,5 +1,6 @@
 use std::convert::TryFrom;
 use std::str::FromStr;
+use structopt::StructOpt;
 
 // Metadata about outbound edges for a node in the 11 node board graph.
 // Each member is a bitmask representing edges of different types.
@@ -643,13 +644,16 @@ mod test {
     }
 }
 
+#[derive(Debug, StructOpt)]
+struct Opt {
+    #[structopt(short, long = "--board", required(true))]
+    board: BoardState,
+    #[structopt(short, long = "--constraints", use_delimiter(true), required(true))]
+    constraints: Vec<Constraint>
+}
+
 fn main() {
-    println!(
-        "Option<Color>={} BoardState={} positions={} analysis={}, ColorInfo={}",
-        std::mem::size_of::<Option<Color>>(),
-        std::mem::size_of::<BoardState>(),
-        std::mem::size_of::<[Option<Color>; BOARD_GRAPH.len()]>(),
-        std::mem::size_of::<Option<BoardStateAnalysis>>(),
-        std::mem::size_of::<ColorInfo>(),
-    );
+    let mut opt = Opt::from_args();
+    // TODO(trevorm): implement fmt::Display for BoardScore
+    println!("{:?}", opt.board.score(&opt.constraints));
 }
