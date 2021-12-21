@@ -1,4 +1,7 @@
+use itertools::Itertools;
+use std::cmp;
 use std::convert::TryFrom;
+use std::fmt;
 use std::str::FromStr;
 use structopt::StructOpt;
 
@@ -20,7 +23,8 @@ struct PositionNode {
 // 5 | 3          \               8
 //  \|/            4
 //   4
-const BOARD_GRAPH: [PositionNode; 11] = [
+const NUM_POSITIONS: usize = 11;
+const BOARD_GRAPH: [PositionNode; NUM_POSITIONS] = [
     PositionNode {
         below: 0,
         adjacent: 0b01111111110,
@@ -108,6 +112,17 @@ enum Constraint {
     Above(Color),
     // There must be more spheres of the first color than the second. Fmt: C1>C2
     GreaterThan(Color, Color),
+}
+
+impl Constraint {
+    fn is_count_constraint(&self) -> bool {
+        match *self {
+            Constraint::Count(_, _) => true,
+            Constraint::SumCount(_, _, _) => true,
+            Constraint::GreaterThan(_, _) => true,
+            _ => false,
+        }
+    }
 }
 
 fn parse_two_colors(one: u8, two: u8) -> Result<(Color, Color), &'static str> {
@@ -211,7 +226,7 @@ struct BoardStateAnalysis {
 }
 
 impl BoardStateAnalysis {
-    fn new(state: &[Option<Color>; BOARD_GRAPH.len()]) -> BoardStateAnalysis {
+    fn new(state: &[Option<Color>; NUM_POSITIONS]) -> BoardStateAnalysis {
         let mut r = BoardStateAnalysis {
             colors: [ColorInfo::default(); NUM_SPHERE_COLORS],
             positions: 0,
@@ -241,8 +256,7 @@ impl BoardStateAnalysis {
 
 #[derive(Debug, PartialEq)]
 struct BoardState {
-    positions: [Option<Color>; BOARD_GRAPH.len()],
-    analysis: Option<BoardStateAnalysis>,
+    positions: [Option<Color>; NUM_POSITIONS],
 }
 
 #[derive(Debug, PartialEq)]
@@ -253,15 +267,89 @@ struct BoardScore {
     flag: bool,
 }
 
+impl BoardScore {
+    fn new(score: usize, flag: bool) -> BoardScore {
+        BoardScore {
+            score: score,
+            flag: flag,
+        }
+    }
+}
+
+impl Default for BoardScore {
+    fn default() -> BoardScore {
+        BoardScore {
+            score: 0,
+            flag: false,
+        }
+    }
+}
+
+impl Ord for BoardScore {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        if self.score < other.score {
+            cmp::Ordering::Less
+        } else if self.score > other.score {
+            cmp::Ordering::Greater
+        } else if self.flag == other.flag {
+            cmp::Ordering::Equal
+        } else if self.flag {
+            cmp::Ordering::Greater
+        } else {
+            cmp::Ordering::Less
+        }
+    }
+}
+
+impl PartialOrd for BoardScore {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(&other))
+    }
+}
+
+impl Eq for BoardScore {}
+
+impl fmt::Display for BoardScore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "score={} flag={}", self.score, self.flag)
+    }
+}
+
 impl BoardState {
+    fn new() -> BoardState {
+        BoardState {
+            positions: [None; NUM_POSITIONS],
+        }
+    }
+
+    fn with_colors(colors: &[Color]) -> BoardState {
+        let mut b = BoardState::new();
+        for (i, c) in colors.iter().enumerate() {
+            b.positions[i] = Some(*c);
+            if i == NUM_POSITIONS {
+                break;
+            }
+        }
+        b
+    }
+
+    fn with_positions(mut positions: &[Option<Color>]) -> BoardState {
+        if positions.len() > NUM_POSITIONS {
+            positions = &positions[0..NUM_POSITIONS];
+        }
+        let mut b = BoardState::new();
+        &b.positions[0..positions.len()].copy_from_slice(positions);
+        b
+    }
+
     // Returns false is this configuration is not valid (physically possible).
     // TODO(trevorm): return Result<(), &'static str> to get better error messages.
-    pub fn is_valid(&mut self) -> bool {
-        if self.analysis.is_none() {
-            self.analysis = Some(BoardStateAnalysis::new(&self.positions));
-        }
+    pub fn is_valid(&self) -> bool {
+        self.is_valid_internal(&BoardStateAnalysis::new(&self.positions))
+    }
+
+    fn is_valid_internal(&self, analysis: &BoardStateAnalysis) -> bool {
         // Every position that is below another position *must* be set.
-        let analysis: &BoardStateAnalysis = self.analysis.as_ref().unwrap();
         if analysis.positions & analysis.below != analysis.below {
             false
         } else {
@@ -269,30 +357,27 @@ impl BoardState {
         }
     }
 
-    pub fn score(&mut self, constraints: &[Constraint]) -> BoardScore {
-        if !self.is_valid() {
-            return BoardScore {
-                score: 0,
-                flag: false,
-            };
+    pub fn score(&self, constraints: &[Constraint]) -> BoardScore {
+        let analysis = BoardStateAnalysis::new(&self.positions);
+        if !self.is_valid_internal(&analysis) {
+            return BoardScore::default();
         }
 
-        let analysis = self.analysis.as_ref().unwrap();
         let invalid = constraints.iter().fold(0, |acc, &c| {
-            if self.matches_constraint(&c, analysis) {
+            if self.matches_constraint(&c, &analysis) {
                 acc
             } else {
                 acc + 1
             }
         });
-        BoardScore {
-            score: if invalid * 2 < analysis.count() {
+        BoardScore::new(
+            if invalid * 2 < analysis.count() {
                 analysis.count() - (invalid * 2)
             } else {
                 0
             },
-            flag: invalid == 0 && analysis.colors.iter().all(|&c| c.positions > 0),
-        }
+            invalid == 0 && analysis.colors.iter().all(|&c| c.positions > 0),
+        )
     }
 
     fn matches_constraint(&self, constraint: &Constraint, analysis: &BoardStateAnalysis) -> bool {
@@ -329,12 +414,12 @@ impl FromStr for BoardState {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() > BOARD_GRAPH.len() {
+        if s.len() > NUM_POSITIONS {
             return Err("cannot fill more than 11 places");
         }
 
-        // NB: if there are less than BOARD_GRAPH.len() characters, the rest are empty.
-        let mut values: [Option<Color>; BOARD_GRAPH.len()] = [None; BOARD_GRAPH.len()];
+        // NB: if there are less than NUM_POSITIONS characters, the rest are empty.
+        let mut values: [Option<Color>; NUM_POSITIONS] = [None; NUM_POSITIONS];
         for (i, c) in s.bytes().enumerate() {
             let r = Color::try_from(c);
             if r.is_ok() {
@@ -344,16 +429,115 @@ impl FromStr for BoardState {
             }
         }
 
-        let mut state = BoardState {
-            positions: values,
-            analysis: None,
-        };
+        let state = BoardState { positions: values };
         if state.is_valid() {
             Ok(state)
         } else {
             Err("parsed board state is not valid")
         }
     }
+}
+
+impl fmt::Display for BoardState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s: [char; NUM_POSITIONS] = ['.'; NUM_POSITIONS];
+        for (i, p) in self.positions.iter().enumerate() {
+            s[i] = match p {
+                Some(c) => match c {
+                    Color::Black => 'K',
+                    Color::White => 'W',
+                    Color::Blue => 'B',
+                    Color::Green => 'G',
+                    Color::Orange => 'O',
+                },
+                None => '.',
+            }
+        }
+        let r: String = s.iter().collect();
+        write!(f, "{}", r)
+    }
+}
+
+// TODO(trevorm): tests for this method.
+fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
+    let count_constraints: Vec<Constraint> = constraints
+        .iter()
+        .filter(|&c| c.is_count_constraint())
+        .copied()
+        .collect();
+    // TODO(trevorm): consider color count constraints when generating this.
+    let input_colors = vec![
+        Color::Black,
+        Color::Black,
+        Color::Black,
+        Color::White,
+        Color::White,
+        Color::White,
+        Color::Blue,
+        Color::Blue,
+        Color::Blue,
+        Color::Green,
+        Color::Green,
+        Color::Green,
+        Color::Orange,
+        Color::Orange,
+        Color::Orange,
+    ];
+    let mut best_board = BoardState::new();
+    let mut best_score = BoardScore::default();
+    // TODO(trevorm): structure this as two passes. The first gets the top possible score
+    // over the list of colors with just count constraints and emits (k, score).
+    // The second iterates over all boards of length k, with cut-outs for those that don't
+    // yield at least score from count constraints. This is greedy -- there are corner cases
+    // where some non-count constraints have count-like behaviors (X|X) but should be pretty
+    // good otherwise.
+    // The second pass can be implemented as an iterator that yields all permutations that
+    // meet the thresholds from the first.
+    for k in (1..=NUM_POSITIONS).rev() {
+        let high_score = BoardScore::new(k, true);
+        if high_score < best_score {
+            break;
+        }
+        println!("Trying mix of {} spheres", k);
+
+        let mut min_count_score = BoardScore::default();
+        for m in input_colors.iter().combinations(k) {
+            let color_mix: Vec<Color> = m.into_iter().copied().collect();
+            let score = BoardState::with_colors(&color_mix).score(&count_constraints);
+            if score > min_count_score {
+                min_count_score = score
+            }
+        }
+
+        for m in input_colors.iter().combinations(k) {
+            let color_mix: Vec<Color> = m.into_iter().copied().collect();
+            let color_board_state = BoardState::with_colors(&color_mix);
+            // Compute the upper bound score based on count constraints. If it's less than the best
+            // score then there's no point pursuing this color mix.
+            if color_board_state.score(&count_constraints) < min_count_score {
+                continue;
+            }
+
+            for p in color_board_state.positions.iter().permutations(k) {
+                let board = BoardState::with_positions(
+                    &p.into_iter().copied().collect::<Vec<Option<Color>>>(),
+                );
+                let score = board.score(&constraints);
+                if score > best_score {
+                    best_board = board;
+                    best_score = score;
+                    if best_score == high_score {
+                        break;
+                    }
+                }
+            }
+
+            if best_score == high_score {
+                break;
+            }
+        }
+    }
+    (best_board, best_score)
 }
 
 mod test {
@@ -457,6 +641,79 @@ mod test {
         test!(not_an_operator, "K-W", Err("unknown constraint operator"));
     }
 
+    mod is_count_constraint {
+        #[allow(unused_imports)]
+        use super::*;
+
+        #[test]
+        fn adjacent() {
+            assert!(!Constraint::Adjacent(Color::Black, Color::Black).is_count_constraint())
+        }
+
+        #[test]
+        fn not_adjacent() {
+            assert!(!Constraint::NotAdjacent(Color::Black, Color::Black).is_count_constraint())
+        }
+
+        #[test]
+        fn count() {
+            assert!(Constraint::Count(1, Color::Black).is_count_constraint())
+        }
+
+        #[test]
+        fn sum_count() {
+            assert!(Constraint::SumCount(2, Color::Black, Color::White).is_count_constraint())
+        }
+
+        #[test]
+        fn below() {
+            assert!(!Constraint::Below(Color::Black).is_count_constraint())
+        }
+
+        #[test]
+        fn above() {
+            assert!(!Constraint::Above(Color::Black).is_count_constraint())
+        }
+
+        #[test]
+        fn greater_than() {
+            assert!(Constraint::GreaterThan(Color::Black, Color::White).is_count_constraint())
+        }
+    }
+
+    mod board_score {
+        #[allow(unused_imports)]
+        use super::*;
+
+        #[test]
+        fn order_score() {
+            assert!(BoardScore::new(3, false) < BoardScore::new(5, false));
+            assert!(BoardScore::new(7, false) > BoardScore::new(5, false));
+            assert_eq!(BoardScore::new(5, false), BoardScore::new(5, false));
+        }
+
+        #[test]
+        fn order_flag() {
+            assert!(BoardScore::new(5, false) < BoardScore::new(5, true));
+            assert!(BoardScore::new(5, true) > BoardScore::new(5, false));
+            assert_eq!(BoardScore::new(5, false), BoardScore::new(5, false));
+            assert_eq!(BoardScore::new(5, true), BoardScore::new(5, true));
+        }
+
+        #[test]
+        fn format() {
+            assert_eq!(format!("{}", BoardScore::default()), "score=0 flag=false");
+            assert_eq!(
+                format!("{}", BoardScore::new(5, false)),
+                "score=5 flag=false"
+            );
+            assert_eq!(
+                format!("{}", BoardScore::new(11, true)),
+                "score=11 flag=true"
+            );
+        }
+    }
+
     mod board_state_from_str {
         #[allow(unused_imports)]
         use super::*;
@@ -539,6 +796,48 @@ mod test {
                 Err("parsed board state is not valid")
             )
         }
+    }
+
+    mod board_state_format {
+        #[allow(unused_imports)]
+        use super::*;
+        macro_rules! test {
+            ($name: ident, $c: expr, $expected:expr) => {
+                #[test]
+                fn $name() {
+                    let actual = format!("{}", BoardState::with_positions(&$c));
+                    assert_eq!(
+                        $expected, actual,
+                        "expected={} actual={}",
+                        $expected, actual
+                    );
+                }
+            };
+        }
+
+        test!(black, [Some(Color::Black)], "K..........");
+        test!(white, [Some(Color::White)], "W..........");
+        test!(blue, [Some(Color::Blue)], "B..........");
+        test!(green, [Some(Color::Green)], "G..........");
+        test!(orange, [Some(Color::Orange)], "O..........");
+        test!(empty, [None, Some(Color::Orange)], ".O.........");
+        test!(
+            eleven,
+            [
+                Some(Color::Black),
+                Some(Color::White),
+                Some(Color::White),
+                Some(Color::White),
+                Some(Color::Blue),
+                Some(Color::Blue),
+                Some(Color::Blue),
+                Some(Color::Green),
+                Some(Color::Green),
+                Some(Color::Green),
+                Some(Color::Orange)
+            ],
+            "KWWWBBBGGGO"
+        );
     }
 
     mod board_state_valid {
@@ -646,14 +945,21 @@ mod test {
 
 #[derive(Debug, StructOpt)]
 struct Opt {
-    #[structopt(short, long = "--board", required(true))]
-    board: BoardState,
+    #[structopt(short, long = "--board")]
+    board: Option<BoardState>,
     #[structopt(short, long = "--constraints", use_delimiter(true), required(true))]
-    constraints: Vec<Constraint>
+    constraints: Vec<Constraint>,
 }
 
 fn main() {
-    let mut opt = Opt::from_args();
-    // TODO(trevorm): implement fmt::Display for BoardScore
-    println!("{:?}", opt.board.score(&opt.constraints));
+    let opt = Opt::from_args();
+    match opt.board {
+        Some(board) => {
+            println!("{}", board.score(&opt.constraints))
+        }
+        None => {
+            let (board, score) = solve(&opt.constraints);
+            println!("{} {}", board, score)
+        }
+    }
 }
