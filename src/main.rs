@@ -5,11 +5,6 @@ use structopt::StructOpt;
 
 // TODO(trevorm): tests for this method.
 fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
-    let count_constraints: Vec<Constraint> = constraints
-        .iter()
-        .filter(|&c| c.is_count_constraint())
-        .copied()
-        .collect();
     // TODO(trevorm): consider color count constraints when generating this.
     let input_colors = vec![
         Color::Black,
@@ -48,7 +43,7 @@ fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
         let mut min_count_score = BoardScore::default();
         for m in input_colors.iter().combinations(k) {
             let color_mix: Vec<Color> = m.into_iter().copied().collect();
-            let score = BoardState::with_colors(&color_mix).score(&count_constraints);
+            let score = BoardState::with_colors(&color_mix).count_score(&constraints);
             if score > min_count_score {
                 min_count_score = score
             }
@@ -59,7 +54,7 @@ fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
             let color_board_state = BoardState::with_colors(&color_mix);
             // Compute the upper bound score based on count constraints. If it's less than the best
             // score then there's no point pursuing this color mix.
-            if color_board_state.score(&count_constraints) < min_count_score {
+            if color_board_state.count_score(&constraints) < min_count_score {
                 continue;
             }
 
