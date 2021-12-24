@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use dimension::{BoardState, Constraint};
+use pprof::criterion::{PProfProfiler, Output};
 use std::str::FromStr;
 
 fn parse_constraints(s: &str) -> Vec<Constraint> {
@@ -35,5 +36,9 @@ fn bm_score(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bm_score);
+criterion_group!{
+    name = benches;
+    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+    targets = bm_score
+}
 criterion_main!(benches);
