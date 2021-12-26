@@ -56,8 +56,14 @@ fn get_upper_bound_scores(constraints: &[Constraint]) -> Vec<(usize, BoardScore)
 }
 
 // TODO(trevorm): tests for this method.
+// TODO(trevorm): handle conflicting constraints better. This does pretty well with
+// count based conflicts due to upper bound handling but does awful on position based
+// constraints. Solutions in order of effectiveness:
+// * Remove conflicting constraints before solving an apply later.
+// * Remove duplicate permutations during generation to reduce number of scoring calls.
+// * Accelerate scoring through vectorization technique.
 fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
-    let mut best_board = BoardState::new();
+    let mut best_board = BoardState::default();
     let mut best_score = BoardScore::default();
 
     for (k, max_score) in get_upper_bound_scores(constraints) {
@@ -67,14 +73,8 @@ fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
 
         // Iterate over all ColorMixes whose approximate_score() matches max_score, then iterate
         // over those permutations to compute final scores.
-        for m in get_all_color_mixes(k).filter(|m| m.approximate_score(&constraints) == max_score) {
-            let color_board_state = BoardState::from(&m);
-
-            // TODO(trevorm): eliminate the bad touch.
-            for p in color_board_state.positions.iter().permutations(k) {
-                let board = BoardState::with_positions(
-                    &p.into_iter().copied().collect::<Vec<Option<Color>>>(),
-                );
+        for mix in get_all_color_mixes(k).filter(|m| m.approximate_score(&constraints) == max_score) {
+            for board in BoardState::permutations_from_color_mix(&mix) {
                 let score = board.score(&constraints);
                 if score > best_score {
                     best_board = board;

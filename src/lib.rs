@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use std::cmp;
 use std::convert::TryFrom;
 use std::fmt;
@@ -307,6 +308,7 @@ where
                 None => return None,
                 Some(c) => {
                     let mix = ColorMix::with_colors(&c);
+                    debug_assert!(mix.is_ok());
                     if mix.is_ok() {
                         return mix.ok();
                     }
@@ -378,6 +380,10 @@ impl BoardStateAnalysis {
         r
     }
 
+    pub fn is_valid(&self) -> bool {
+        self.positions & self.below == self.below && self.colors.iter().all(|&c| c.count() <= 3)
+    }
+
     fn count(&self) -> usize {
         self.positions.count_ones() as usize
     }
@@ -385,12 +391,6 @@ impl BoardStateAnalysis {
     fn color(&self, c: Color) -> &ColorInfo {
         return &self.colors[c as usize];
     }
-}
-
-#[derive(Debug, PartialEq)]
-pub struct BoardState {
-    // TODO(trevorm): make this private again.
-    pub positions: [Option<Color>; NUM_POSITIONS],
 }
 
 #[derive(Debug, PartialEq)]
@@ -456,94 +456,123 @@ impl fmt::Display for BoardScore {
     }
 }
 
+type Positions = [Option<Color>; NUM_POSITIONS];
+#[derive(Debug, PartialEq)]
+pub struct BoardState {
+    positions: Positions,
+    analysis: BoardStateAnalysis,
+}
+
 impl BoardState {
-    pub fn new() -> BoardState {
-        BoardState {
-            positions: [None; NUM_POSITIONS],
-        }
-    }
-
-    pub fn with_colors(colors: &[Color]) -> BoardState {
-        let mut b = BoardState::new();
-        for (i, c) in colors.iter().enumerate() {
-            b.positions[i] = Some(*c);
-            if i == NUM_POSITIONS {
-                break;
-            }
-        }
-        b
-    }
-
-    pub fn with_positions(mut positions: &[Option<Color>]) -> BoardState {
+    // Create a BoardState with the input positions. Returns None if the board is not valid.
+    pub fn with_positions(mut positions: &[Option<Color>]) -> Option<BoardState> {
         if positions.len() > NUM_POSITIONS {
             positions = &positions[0..NUM_POSITIONS];
         }
-        let mut b = BoardState::new();
-        &b.positions[0..positions.len()].copy_from_slice(positions);
-        b
+        let mut bp: Positions = [None; NUM_POSITIONS];
+        // Unroll the loop in the common case.
+        if positions.len() == NUM_POSITIONS {
+            bp[0] = positions[0];
+            bp[1] = positions[1];
+            bp[2] = positions[2];
+            bp[3] = positions[3];
+            bp[4] = positions[4];
+            bp[5] = positions[5];
+            bp[6] = positions[6];
+            bp[7] = positions[7];
+            bp[8] = positions[8];
+            bp[9] = positions[9];
+            bp[10] = positions[10];
+        } else {
+            for (i, p) in positions.iter().enumerate() {
+                bp[i] = *p;
+            }
+        }
+        let analysis = BoardStateAnalysis::new(&bp);
+        if analysis.is_valid() {
+            Some(BoardState {
+                positions: bp,
+                analysis: analysis,
+            })
+        } else {
+            None
+        }
+    }
+
+    // Produces all BoardState permutation from a single ColorMix.
+    pub fn permutations_from_color_mix(mix: &ColorMix) -> impl Iterator<Item = BoardState> {
+        let positions: Vec<Option<Color>> =
+            BoardState::from(mix).positions.iter().copied().collect();
+        positions.into_iter().permutations(11).as_board_state()
+    }
+
+    pub fn num_spheres(&self) -> usize {
+        self.analysis.count()
     }
 
     // Returns false is this configuration is not valid (physically possible).
     // TODO(trevorm): return Result<(), &'static str> to get better error messages.
     pub fn is_valid(&self) -> bool {
-        self.is_valid_internal(&BoardStateAnalysis::new(&self.positions))
-    }
-
-    fn is_valid_internal(&self, analysis: &BoardStateAnalysis) -> bool {
-        // Every position that is below another position *must* be set.
-        if analysis.positions & analysis.below != analysis.below {
-            false
-        } else {
-            analysis.colors.iter().all(|&c| c.count() <= 3)
-        }
+        self.analysis.is_valid()
     }
 
     pub fn score(&self, constraints: &[Constraint]) -> BoardScore {
-        let analysis = BoardStateAnalysis::new(&self.positions);
-        if !self.is_valid_internal(&analysis) {
+        if !self.is_valid() {
             return BoardScore::default();
         }
 
         let invalid = constraints.iter().fold(0, |acc, &c| {
-            if self.matches_constraint(&c, &analysis) {
+            if self.matches_constraint(&c) {
                 acc
             } else {
                 acc + 1
             }
         });
         BoardScore::with_state(
-            analysis.count(),
+            self.analysis.count(),
             invalid,
-            analysis.colors.iter().all(|&c| c.positions > 0),
+            self.analysis.colors.iter().all(|&c| c.positions > 0),
         )
     }
 
-    fn matches_constraint(&self, constraint: &Constraint, analysis: &BoardStateAnalysis) -> bool {
+    fn matches_constraint(&self, constraint: &Constraint) -> bool {
         match constraint {
             Constraint::Adjacent(color1, color2) => {
-                let c1 = analysis.color(*color1);
-                let c2 = analysis.color(*color2);
+                let c1 = self.analysis.color(*color1);
+                let c2 = self.analysis.color(*color2);
                 c1.positions & c2.adjacent == c1.positions
                     && c2.positions & c1.adjacent == c2.positions
             }
             Constraint::NotAdjacent(color1, color2) => {
-                let c1 = analysis.color(*color1);
-                let c2 = analysis.color(*color2);
+                let c1 = self.analysis.color(*color1);
+                let c2 = self.analysis.color(*color2);
                 c1.positions & !c2.adjacent == c1.positions
                     && c2.positions & !c1.adjacent == c2.positions
             }
-            Constraint::Count(count, color) => analysis.color(*color).count() == *count,
+            Constraint::Count(count, color) => self.analysis.color(*color).count() == *count,
             Constraint::SumCount(count, color1, color2) => {
-                analysis.color(*color1).count() + analysis.color(*color2).count() == *count
+                self.analysis.color(*color1).count() + self.analysis.color(*color2).count()
+                    == *count
             }
             Constraint::Below(color) => {
-                let color_positions = analysis.color(*color).positions;
-                color_positions & analysis.below == color_positions
+                let color_positions = self.analysis.color(*color).positions;
+                color_positions & self.analysis.below == color_positions
             }
-            Constraint::Above(color) => analysis.color(*color).positions & analysis.below == 0,
+            Constraint::Above(color) => {
+                self.analysis.color(*color).positions & self.analysis.below == 0
+            }
             Constraint::GreaterThan(color1, color2) => {
-                analysis.color(*color1).count() > analysis.color(*color2).count()
+                self.analysis.color(*color1).count() > self.analysis.color(*color2).count()
             }
+        }
+    }
+}
+
+impl Default for BoardState {
+    fn default() -> BoardState {
+        BoardState {
+            positions: [None; NUM_POSITIONS],
+            analysis: BoardStateAnalysis::new(&[None; NUM_POSITIONS]),
         }
     }
 }
@@ -567,12 +596,7 @@ impl FromStr for BoardState {
             }
         }
 
-        let state = BoardState { positions: values };
-        if state.is_valid() {
-            Ok(state)
-        } else {
-            Err("parsed board state is not valid")
-        }
+        BoardState::with_positions(&values).ok_or("Parsed board state is not valid")
     }
 }
 
@@ -598,20 +622,56 @@ impl fmt::Display for BoardState {
 
 impl From<&ColorMix> for BoardState {
     fn from(mix: &ColorMix) -> BoardState {
-        let mut state = BoardState::new();
+        let mut positions: Positions = [None; NUM_POSITIONS];
         let mut sum = 0;
-        &state.positions[sum..(sum + mix.counts[0])].fill(Some(Color::Black));
+        &positions[sum..(sum + mix.counts[0])].fill(Some(Color::Black));
         sum += mix.counts[0];
-        &state.positions[sum..(sum + mix.counts[1])].fill(Some(Color::White));
+        &positions[sum..(sum + mix.counts[1])].fill(Some(Color::White));
         sum += mix.counts[1];
-        &state.positions[sum..(sum + mix.counts[2])].fill(Some(Color::Blue));
+        &positions[sum..(sum + mix.counts[2])].fill(Some(Color::Blue));
         sum += mix.counts[2];
-        &state.positions[sum..(sum + mix.counts[3])].fill(Some(Color::Green));
+        &positions[sum..(sum + mix.counts[3])].fill(Some(Color::Green));
         sum += mix.counts[3];
-        &state.positions[sum..(sum + mix.counts[4])].fill(Some(Color::Orange));
-        state
+        &positions[sum..(sum + mix.counts[4])].fill(Some(Color::Orange));
+        BoardState::with_positions(&positions).unwrap()
     }
 }
+
+pub struct BoardStateAdaptor<I: Iterator> {
+    iter: I,
+}
+
+impl<I> Iterator for BoardStateAdaptor<I>
+where
+    I: Iterator<Item = Vec<Option<Color>>>,
+{
+    type Item = BoardState;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(p) => {
+                    let board = BoardState::with_positions(&p);
+                    if board.is_some() {
+                        return board;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub trait BoardStateIterator: Iterator {
+    fn as_board_state(self) -> BoardStateAdaptor<Self>
+    where
+        Self: Sized + Iterator<Item = Vec<Option<Color>>>,
+    {
+        BoardStateAdaptor { iter: self }
+    }
+}
+
+impl<I: Iterator<Item = Vec<Option<Color>>>> BoardStateIterator for I {}
 
 mod test {
     use super::*;
@@ -893,7 +953,7 @@ mod test {
         fn missing_l0() {
             assert_eq!(
                 BoardState::from_str(".KKKWWWOOOG"),
-                Err("parsed board state is not valid")
+                Err("Parsed board state is not valid")
             )
         }
 
@@ -901,7 +961,7 @@ mod test {
         fn missing_l1() {
             assert_eq!(
                 BoardState::from_str("OKKKWWW...G"),
-                Err("parsed board state is not valid")
+                Err("Parsed board state is not valid")
             )
         }
 
@@ -909,7 +969,7 @@ mod test {
         fn color_limit3() {
             assert_eq!(
                 BoardState::from_str("OKKKWWWBBBK"),
-                Err("parsed board state is not valid")
+                Err("Parsed board state is not valid")
             )
         }
     }
@@ -921,7 +981,7 @@ mod test {
             ($name: ident, $c: expr, $expected:expr) => {
                 #[test]
                 fn $name() {
-                    let actual = format!("{}", BoardState::with_positions(&$c));
+                    let actual = format!("{}", BoardState::with_positions(&$c).unwrap());
                     assert_eq!(
                         $expected, actual,
                         "expected={} actual={}",
