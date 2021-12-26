@@ -181,6 +181,152 @@ impl FromStr for Constraint {
     }
 }
 
+#[derive(Debug)]
+pub struct ColorMix {
+    counts: [usize; NUM_SPHERE_COLORS],
+}
+
+impl ColorMix {
+    pub fn with_colors(colors: &[Color]) -> Result<ColorMix, &'static str> {
+        if colors.len() > NUM_POSITIONS {
+            return Err("ColorMix may not have more than 11 colors");
+        }
+        let mut mix = ColorMix {
+            counts: [0; NUM_SPHERE_COLORS],
+        };
+        // Most of the cost of this method is branching in the loop. 11 is the common case
+        // so we unroll it here.
+        if colors.len() == 11 {
+            mix.counts[colors[0] as usize] += 1;
+            mix.counts[colors[1] as usize] += 1;
+            mix.counts[colors[2] as usize] += 1;
+            mix.counts[colors[3] as usize] += 1;
+            mix.counts[colors[4] as usize] += 1;
+            mix.counts[colors[5] as usize] += 1;
+            mix.counts[colors[6] as usize] += 1;
+            mix.counts[colors[7] as usize] += 1;
+            mix.counts[colors[8] as usize] += 1;
+            mix.counts[colors[9] as usize] += 1;
+            mix.counts[colors[10] as usize] += 1;
+        } else {
+            for c in colors {
+                mix.counts[*c as usize] += 1;
+            }
+        }
+        if mix.counts.iter().all(|&c| c <= 3) {
+            Ok(mix)
+        } else {
+            Err("ColorMix may not have more than 3 of any color")
+        }
+    }
+
+    pub fn num_spheres(&self) -> usize {
+        self.counts.iter().sum()
+    }
+
+    pub fn has_all_colors(&self) -> bool {
+        self.counts.iter().all(|&c| c > 0)
+    }
+
+    // Returns an upper bound of the number of matching constraints based entirely on the
+    // mix of colors used.
+    pub fn approximate_matching_constraints(&self, constraints: &[Constraint]) -> usize {
+        return constraints
+            .iter()
+            .filter(|&c| self.matches_constraint(&c))
+            .count();
+    }
+
+    fn matches_constraint(&self, constraint: &Constraint) -> bool {
+        match constraint {
+            Constraint::Adjacent(color1, color2) => {
+                if *color1 == *color2 {
+                    let c = self.counts[*color1 as usize];
+                    // There must be zero or 2+ to fulfill this constraint.
+                    c == 0 || c > 1
+                } else {
+                    let c1 = self.counts[*color1 as usize];
+                    let c2 = self.counts[*color2 as usize];
+                    // To be adjacent there must be 0 of both or more than 0 of both.
+                    (c1 == 0 && c2 == 0) || (c1 > 0 && c2 > 0)
+                }
+            }
+            Constraint::Count(count, color) => self.counts[*color as usize] == *count,
+            Constraint::SumCount(count, color1, color2) => {
+                self.counts[*color1 as usize] + self.counts[*color2 as usize] == *count
+            }
+            Constraint::GreaterThan(color1, color2) => {
+                self.counts[*color1 as usize] > self.counts[*color2 as usize]
+            }
+            // Approximations of these are too pessimistic given that we are trying
+            // to compute an upper bound score. The best approximations only return true
+            // when a targeted color is 0, where the flag cannot be set.
+            Constraint::NotAdjacent(_, _) => true,
+            Constraint::Below(_) => true,
+            Constraint::Above(_) => true,
+        }
+    }
+
+    pub fn approximate_score(&self, constraints: &[Constraint]) -> BoardScore {
+        let matching = self.approximate_matching_constraints(constraints);
+        BoardScore::with_state(
+            self.num_spheres(),
+            constraints.len() - matching,
+            self.has_all_colors(),
+        )
+    }
+}
+
+impl FromStr for ColorMix {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut colors: Vec<Color> = Vec::with_capacity(s.len());
+        for b in s.bytes() {
+            match Color::try_from(b) {
+                Ok(c) => colors.push(c),
+                Err(e) => return Err(e),
+            }
+        }
+        ColorMix::with_colors(&colors)
+    }
+}
+
+pub struct ColorMixAdaptor<I: Iterator> {
+    iter: I,
+}
+
+impl<I> Iterator for ColorMixAdaptor<I>
+where
+    I: Iterator<Item = Vec<Color>>,
+{
+    type Item = ColorMix;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                None => return None,
+                Some(c) => {
+                    let mix = ColorMix::with_colors(&c);
+                    if mix.is_ok() {
+                        return mix.ok();
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub trait ColorMixIterator: Iterator {
+    fn as_color_mix(self) -> ColorMixAdaptor<Self>
+    where
+        Self: Sized + Iterator<Item = Vec<Color>>,
+    {
+        ColorMixAdaptor { iter: self }
+    }
+}
+
+impl<I: Iterator<Item = Vec<Color>>> ColorMixIterator for I {}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct ColorInfo {
     // Bitmap of matching positions.
@@ -263,10 +409,11 @@ impl BoardScore {
         }
     }
 
+    // XXX there's got to be a better way.
     // total      -- the number of spheres in the board state.
     // invalid    -- number of non-matching constraints.
     // all_colors -- true if all colors have at least one sphere.
-    fn with_state(total: usize, invalid: usize, all_colors: bool) -> BoardScore {
+    pub fn with_state(total: usize, invalid: usize, all_colors: bool) -> BoardScore {
         BoardScore::new(
             if invalid * 2 < total {
                 total - (invalid * 2)
@@ -289,17 +436,9 @@ impl Default for BoardScore {
 
 impl Ord for BoardScore {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        if self.score < other.score {
-            cmp::Ordering::Less
-        } else if self.score > other.score {
-            cmp::Ordering::Greater
-        } else if self.flag == other.flag {
-            cmp::Ordering::Equal
-        } else if self.flag {
-            cmp::Ordering::Greater
-        } else {
-            cmp::Ordering::Less
-        }
+        self.score
+            .cmp(&other.score)
+            .then(self.flag.cmp(&other.flag))
     }
 }
 
@@ -407,64 +546,6 @@ impl BoardState {
             }
         }
     }
-
-    // Computes a score based only on the number of occurrences of each color.
-    // This is an upper bound; the final score may be the same or lower.
-    pub fn count_score(&self, constraints: &[Constraint]) -> BoardScore {
-        let mut counts: [usize; NUM_SPHERE_COLORS] = [0; NUM_SPHERE_COLORS];
-        let mut total = 0;
-        for p in self.positions.iter() {
-            match *p {
-                Some(c) => {
-                    counts[c as usize] = counts[c as usize] + 1;
-                    total = total + 1
-                }
-                None => {}
-            }
-        }
-        let invalid = constraints.iter().fold(0, |acc, &c| {
-            if self.matches_count_constraint(&c, &counts) {
-                acc
-            } else {
-                acc + 1
-            }
-        });
-        BoardScore::with_state(total, invalid, counts.iter().all(|&c| c > 0))
-    }
-
-    fn matches_count_constraint(
-        &self,
-        constraint: &Constraint,
-        counts: &[usize; NUM_SPHERE_COLORS],
-    ) -> bool {
-        match constraint {
-            Constraint::Adjacent(color1, color2) => {
-                if *color1 == *color2 {
-                    let c = counts[*color1 as usize];
-                    // There must be zero or 2+ to fulfill this constraint.
-                    c == 0 || c > 1
-                } else {
-                    let c1 = counts[*color1 as usize];
-                    let c2 = counts[*color2 as usize];
-                    // To be adjacent there must be 0 of both or more than 0 of both.
-                    (c1 == 0 && c2 == 0) || (c1 > 0 && c2 > 0)
-                }
-            }
-            Constraint::Count(count, color) => counts[*color as usize] == *count,
-            Constraint::SumCount(count, color1, color2) => {
-                counts[*color1 as usize] + counts[*color2 as usize] == *count
-            }
-            Constraint::GreaterThan(color1, color2) => {
-                counts[*color1 as usize] > counts[*color2 as usize]
-            }
-            // Approximations of these are too pessimistic given that we are trying
-            // to compute an upper bound score. The best approximations only return true
-            // when a targeted color is 0, where the flag cannot be set.
-            Constraint::NotAdjacent(_, _) => true,
-            Constraint::Below(_) => true,
-            Constraint::Above(_) => true,
-        }
-    }
 }
 
 impl FromStr for BoardState {
@@ -515,6 +596,23 @@ impl fmt::Display for BoardState {
     }
 }
 
+impl From<&ColorMix> for BoardState {
+    fn from(mix: &ColorMix) -> BoardState {
+        let mut state = BoardState::new();
+        let mut sum = 0;
+        &state.positions[sum..(sum + mix.counts[0])].fill(Some(Color::Black));
+        sum += mix.counts[0];
+        &state.positions[sum..(sum + mix.counts[1])].fill(Some(Color::White));
+        sum += mix.counts[1];
+        &state.positions[sum..(sum + mix.counts[2])].fill(Some(Color::Blue));
+        sum += mix.counts[2];
+        &state.positions[sum..(sum + mix.counts[3])].fill(Some(Color::Green));
+        sum += mix.counts[3];
+        &state.positions[sum..(sum + mix.counts[4])].fill(Some(Color::Orange));
+        state
+    }
+}
+
 mod test {
     use super::*;
 
@@ -522,7 +620,7 @@ mod test {
     fn parse_constraints(s: &str) -> Vec<Constraint> {
         let mut out = Vec::<Constraint>::new();
         if s.is_empty() {
-            return out
+            return out;
         }
         for x in s.split(',') {
             match Constraint::from_str(x) {
@@ -662,6 +760,74 @@ mod test {
                 "score=11 flag=true"
             );
         }
+    }
+
+    mod color_mix_approximate_score {
+        #[allow(unused_imports)]
+        use super::*;
+        macro_rules! test {
+            ($name:ident, $s:expr, $c:expr, $score:expr) => {
+                #[test]
+                fn $name() {
+                    let mix = ColorMix::from_str($s);
+                    let constraints = parse_constraints($c);
+                    assert_eq!(mix.unwrap().approximate_score(&constraints).score, $score);
+                }
+            };
+            ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
+                #[test]
+                fn $name() {
+                    let mix = ColorMix::from_str($s);
+                    let constraints = parse_constraints($c);
+                    assert_eq!(
+                        mix.unwrap().approximate_score(&constraints),
+                        BoardScore {
+                            score: $score,
+                            flag: $flag
+                        }
+                    );
+                }
+            };
+        }
+
+        test!(adjacent1, "KOBG", "K|W", 2);
+        test!(adjacent2, "WOBG", "K|W", 2);
+        test!(adjacent3, "KWOBG", "K|W", 5);
+        // This one isn't adjacent but if you're only looking at counts it's fine.
+        test!(adjacent4, "GWWOKB", "K|W", 6);
+        // Vacuously true (neither color appears).
+        test!(adjacent5, "OBG", "K|W", 3);
+        // Vacuously true (black doesn't appear).
+        test!(adjacent6, "WOBG", "K|K", 4);
+        // Can't match because there's no second black sphere to be next to.
+        test!(adjacent7, "KWOBG", "K|K", 3);
+        // 2+ spheres of same color is ok though.
+        test!(adjacent8, "WKOBGK", "K|K", 6);
+        test!(not_adjacent1, "KWKWKW", "KxW", 6);
+        test!(not_adjacent2, "GKKWW", "KxW", 5);
+        test!(count1, "B", "B2B", 0);
+        test!(count2, "BK", "B2B", 0);
+        test!(count3, "BKK", "B2B", 1);
+        test!(count4, "BKKB", "B2B", 4);
+        test!(count5, "BKKBB", "B2B", 3);
+        test!(sum_count1, "B", "B2K", 0);
+        test!(sum_count2, "BK", "B2K", 2);
+        test!(sum_count3, "BKW", "B2K", 3);
+        test!(sum_count4, "BKWB", "B2K", 2);
+        test!(sum_count5, "BKWK", "B2K", 2);
+        test!(sum_count6, "BKW", "K2B", 3);
+        test!(below1, "WWW", "*/W", 3);
+        test!(below2, "WWWB", "*/W", 4);
+        test!(above1, "WWW", "W/*", 3);
+        test!(above2, "WWWB", "W/*", 4);
+        test!(greater_than1, "G", "G>O", 1);
+        test!(greater_than2, "GW", "G>O", 2);
+        test!(greater_than3, "GWO", "G>O", 1);
+        test!(greater_than4, "GWOO", "G>O", 2);
+        test!(greater_than5, "GWOOG", "G>O", 3);
+        test!(greater_than6, "GWOOGG", "G>O", 6);
+        test!(flag_trivial, "KWBOG", "", 5, true);
+        test!(flag_constraint, "KWBOG", "K1K", 5, true);
     }
 
     mod board_state_from_str {
@@ -865,74 +1031,6 @@ mod test {
         test!(above4, "WBBBKKKOOOW", "W/*", 9);
         test!(above5, "GBBBKKKOOOW", "W/*", 11);
         test!(above6, "GBBBKKKWWW", "W/*", 10);
-        test!(greater_than1, "G", "G>O", 1);
-        test!(greater_than2, "GW", "G>O", 2);
-        test!(greater_than3, "GWO", "G>O", 1);
-        test!(greater_than4, "GWOO", "G>O", 2);
-        test!(greater_than5, "GWOOG", "G>O", 3);
-        test!(greater_than6, "GWOOGG", "G>O", 6);
-        test!(flag_trivial, "KWBOG", "", 5, true);
-        test!(flag_constraint, "KWBOG", "K1K", 5, true);
-    }
-
-    mod board_state_count_score {
-        #[allow(unused_imports)]
-        use super::*;
-        macro_rules! test {
-            ($name:ident, $s:expr, $c:expr, $score:expr) => {
-                #[test]
-                fn $name() {
-                    let state = BoardState::from_str($s);
-                    let constraints = parse_constraints($c);
-                    assert_eq!(state.unwrap().count_score(&constraints).score, $score);
-                }
-            };
-            ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
-                #[test]
-                fn $name() {
-                    let state = BoardState::from_str($s);
-                    let constraints = parse_constraints($c);
-                    assert_eq!(
-                        state.unwrap().count_score(&constraints),
-                        BoardScore {
-                            score: $score,
-                            flag: $flag
-                        }
-                    );
-                }
-            };
-        }
-
-        test!(adjacent1, "KOBG", "K|W", 2);
-        test!(adjacent2, "WOBG", "K|W", 2);
-        test!(adjacent3, "KWOBG", "K|W", 5);
-        // This one isn't adjacent but if you're only looking at counts it's fine.
-        test!(adjacent4, "GWWOKB", "K|W", 6);
-        // Vacuously true (neither color appears).
-        test!(adjacent5, "OBG", "K|W", 3);
-        // Vacuously true (black doesn't appear).
-        test!(adjacent6, "WOBG", "K|K", 4);
-        // Can't match because there's no second black sphere to be next to.
-        test!(adjacent7, "KWOBG", "K|K", 3);
-        // 2+ spheres of same color is ok though.
-        test!(adjacent8, "WKOBGK", "K|K", 6);
-        test!(not_adjacent1, ".KWKWKW", "KxW", 6);
-        test!(not_adjacent2, "GKK.WW", "KxW", 5);
-        test!(count1, "B", "B2B", 0);
-        test!(count2, "BK", "B2B", 0);
-        test!(count3, "BKK", "B2B", 1);
-        test!(count4, "BKKB", "B2B", 4);
-        test!(count5, "BKKBB", "B2B", 3);
-        test!(sum_count1, "B", "B2K", 0);
-        test!(sum_count2, "BK", "B2K", 2);
-        test!(sum_count3, "BKW", "B2K", 3);
-        test!(sum_count4, "BKWB", "B2K", 2);
-        test!(sum_count5, "BKWK", "B2K", 2);
-        test!(sum_count6, "BKW", "K2B", 3);
-        test!(below1, "WWW", "*/W", 3);
-        test!(below2, "WWW....B", "*/W", 4);
-        test!(above1, "WWW", "W/*", 3);
-        test!(above2, "WWW....B", "W/*", 4);
         test!(greater_than1, "G", "G>O", 1);
         test!(greater_than2, "GW", "G>O", 2);
         test!(greater_than3, "GWO", "G>O", 1);
