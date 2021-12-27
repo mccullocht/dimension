@@ -95,6 +95,18 @@ impl TryFrom<u8> for Color {
     }
 }
 
+impl From<Color> for u8 {
+    fn from(value: Color) -> u8 {
+        match value {
+            Color::Black => b'K',
+            Color::White => b'W',
+            Color::Blue => b'B',
+            Color::Green => b'G',
+            Color::Orange => b'O',
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Constraint {
     // All spheres of these two colors must be adjacent to one another. Fmt: C1|C2
@@ -338,58 +350,22 @@ struct ColorInfo {
 }
 
 impl ColorInfo {
+    fn count(self) -> usize {
+        self.positions.count_ones() as usize
+    }
+
+    fn add(&mut self, position: usize) {
+        self.positions |= 1 << position;
+        self.adjacent |= BOARD_GRAPH[position].adjacent;
+    }
+}
+
+impl Default for ColorInfo {
     fn default() -> ColorInfo {
         ColorInfo {
             positions: 0,
             adjacent: 0,
         }
-    }
-
-    fn count(self) -> usize {
-        self.positions.count_ones() as usize
-    }
-}
-
-#[derive(Debug, PartialEq)]
-struct BoardStateAnalysis {
-    // Information broken down per-color.
-    colors: [ColorInfo; NUM_SPHERE_COLORS],
-    // Bitmap of set positions.
-    positions: u16,
-    // Bitmap of all positions below set positions.
-    below: u16,
-}
-
-impl BoardStateAnalysis {
-    fn new(state: &[Option<Color>; NUM_POSITIONS]) -> BoardStateAnalysis {
-        let mut r = BoardStateAnalysis {
-            colors: [ColorInfo::default(); NUM_SPHERE_COLORS],
-            positions: 0,
-            below: 0,
-        };
-        for (i, p) in state.iter().enumerate() {
-            if p.is_none() {
-                continue;
-            }
-            r.positions |= 1 << i;
-            r.below |= BOARD_GRAPH[i].below;
-            let mut c: &mut ColorInfo = &mut r.colors[p.unwrap() as usize];
-            c.positions |= 1 << i;
-            c.adjacent |= BOARD_GRAPH[i].adjacent;
-        }
-        r
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.positions & self.below == self.below && self.colors.iter().all(|&c| c.count() <= 3)
-    }
-
-    fn count(&self) -> usize {
-        self.positions.count_ones() as usize
-    }
-
-    fn color(&self, c: Color) -> &ColorInfo {
-        return &self.colors[c as usize];
     }
 }
 
@@ -459,8 +435,9 @@ impl fmt::Display for BoardScore {
 type Positions = [Option<Color>; NUM_POSITIONS];
 #[derive(Debug, PartialEq)]
 pub struct BoardState {
-    positions: Positions,
-    analysis: BoardStateAnalysis,
+    color_info: [ColorInfo; NUM_SPHERE_COLORS],
+    positions: u16,
+    below: u16,
 }
 
 impl BoardState {
@@ -469,31 +446,27 @@ impl BoardState {
         if positions.len() > NUM_POSITIONS {
             positions = &positions[0..NUM_POSITIONS];
         }
-        let mut bp: Positions = [None; NUM_POSITIONS];
+        let mut board = BoardState::default();
         // Unroll the loop in the common case.
         if positions.len() == NUM_POSITIONS {
-            bp[0] = positions[0];
-            bp[1] = positions[1];
-            bp[2] = positions[2];
-            bp[3] = positions[3];
-            bp[4] = positions[4];
-            bp[5] = positions[5];
-            bp[6] = positions[6];
-            bp[7] = positions[7];
-            bp[8] = positions[8];
-            bp[9] = positions[9];
-            bp[10] = positions[10];
+            board.add_position(positions[0], 0);
+            board.add_position(positions[1], 1);
+            board.add_position(positions[2], 2);
+            board.add_position(positions[3], 3);
+            board.add_position(positions[4], 4);
+            board.add_position(positions[5], 5);
+            board.add_position(positions[6], 6);
+            board.add_position(positions[7], 7);
+            board.add_position(positions[8], 8);
+            board.add_position(positions[9], 9);
+            board.add_position(positions[10], 10);
         } else {
             for (i, p) in positions.iter().enumerate() {
-                bp[i] = *p;
+                board.add_position(*p, i);
             }
         }
-        let analysis = BoardStateAnalysis::new(&bp);
-        if analysis.is_valid() {
-            Some(BoardState {
-                positions: bp,
-                analysis: analysis,
-            })
+        if board.is_valid() {
+            Some(board)
         } else {
             None
         }
@@ -502,18 +475,47 @@ impl BoardState {
     // Produces all BoardState permutation from a single ColorMix.
     pub fn permutations_from_color_mix(mix: &ColorMix) -> impl Iterator<Item = BoardState> {
         let positions: Vec<Option<Color>> =
-            BoardState::from(mix).positions.iter().copied().collect();
+            BoardState::from(mix).positions().iter().copied().collect();
         positions.into_iter().permutations(11).as_board_state()
     }
 
+    fn add_position(&mut self, color: Option<Color>, index: usize) {
+        match color {
+            Some(c) => {
+                self.color_info[c as usize].add(index);
+                self.positions |= 1 << index;
+                self.below |= BOARD_GRAPH[index].below;
+            }
+            None => {}
+        }
+    }
+
     pub fn num_spheres(&self) -> usize {
-        self.analysis.count()
+        self.positions.count_ones() as usize
+    }
+
+    fn fill_positions_from_bitmap(&self, c: Color, mut bitmap: u16, p: &mut Positions) {
+        while bitmap > 0 {
+            let idx = bitmap.trailing_zeros();
+            p[idx as usize] = Some(c);
+            bitmap &= !(1 << idx);
+        }
+    }
+
+    fn positions(&self) -> Positions {
+        let mut p: Positions = [None; NUM_POSITIONS];
+        self.fill_positions_from_bitmap(Color::Black, self.color_info[0].positions, &mut p);
+        self.fill_positions_from_bitmap(Color::White, self.color_info[1].positions, &mut p);
+        self.fill_positions_from_bitmap(Color::Blue, self.color_info[2].positions, &mut p);
+        self.fill_positions_from_bitmap(Color::Green, self.color_info[3].positions, &mut p);
+        self.fill_positions_from_bitmap(Color::Orange, self.color_info[4].positions, &mut p);
+        p
     }
 
     // Returns false is this configuration is not valid (physically possible).
     // TODO(trevorm): return Result<(), &'static str> to get better error messages.
     pub fn is_valid(&self) -> bool {
-        self.analysis.is_valid()
+        self.positions & self.below == self.below && self.color_info.iter().all(|&c| c.count() <= 3)
     }
 
     pub fn score(&self, constraints: &[Constraint]) -> BoardScore {
@@ -529,40 +531,41 @@ impl BoardState {
             }
         });
         BoardScore::with_state(
-            self.analysis.count(),
+            self.num_spheres(),
             invalid,
-            self.analysis.colors.iter().all(|&c| c.positions > 0),
+            self.color_info.iter().all(|&c| c.positions > 0),
         )
+    }
+
+    fn color(&self, c: Color) -> ColorInfo {
+        self.color_info[c as usize]
     }
 
     fn matches_constraint(&self, constraint: &Constraint) -> bool {
         match constraint {
             Constraint::Adjacent(color1, color2) => {
-                let c1 = self.analysis.color(*color1);
-                let c2 = self.analysis.color(*color2);
+                let c1 = self.color(*color1);
+                let c2 = self.color(*color2);
                 c1.positions & c2.adjacent == c1.positions
                     && c2.positions & c1.adjacent == c2.positions
             }
             Constraint::NotAdjacent(color1, color2) => {
-                let c1 = self.analysis.color(*color1);
-                let c2 = self.analysis.color(*color2);
+                let c1 = self.color(*color1);
+                let c2 = self.color(*color2);
                 c1.positions & !c2.adjacent == c1.positions
                     && c2.positions & !c1.adjacent == c2.positions
             }
-            Constraint::Count(count, color) => self.analysis.color(*color).count() == *count,
+            Constraint::Count(count, color) => self.color(*color).count() == *count,
             Constraint::SumCount(count, color1, color2) => {
-                self.analysis.color(*color1).count() + self.analysis.color(*color2).count()
-                    == *count
+                self.color(*color1).count() + self.color(*color2).count() == *count
             }
             Constraint::Below(color) => {
-                let color_positions = self.analysis.color(*color).positions;
-                color_positions & self.analysis.below == color_positions
+                let color_positions = self.color(*color).positions;
+                color_positions & self.below == color_positions
             }
-            Constraint::Above(color) => {
-                self.analysis.color(*color).positions & self.analysis.below == 0
-            }
+            Constraint::Above(color) => self.color(*color).positions & self.below == 0,
             Constraint::GreaterThan(color1, color2) => {
-                self.analysis.color(*color1).count() > self.analysis.color(*color2).count()
+                self.color(*color1).count() > self.color(*color2).count()
             }
         }
     }
@@ -571,8 +574,9 @@ impl BoardState {
 impl Default for BoardState {
     fn default() -> BoardState {
         BoardState {
-            positions: [None; NUM_POSITIONS],
-            analysis: BoardStateAnalysis::new(&[None; NUM_POSITIONS]),
+            color_info: [ColorInfo::default(); NUM_SPHERE_COLORS],
+            positions: 0,
+            below: 0,
         }
     }
 }
@@ -586,7 +590,7 @@ impl FromStr for BoardState {
         }
 
         // NB: if there are less than NUM_POSITIONS characters, the rest are empty.
-        let mut values: [Option<Color>; NUM_POSITIONS] = [None; NUM_POSITIONS];
+        let mut values: Positions = [None; NUM_POSITIONS];
         for (i, c) in s.bytes().enumerate() {
             let r = Color::try_from(c);
             if r.is_ok() {
@@ -603,7 +607,7 @@ impl FromStr for BoardState {
 impl fmt::Display for BoardState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s: [char; NUM_POSITIONS] = ['.'; NUM_POSITIONS];
-        for (i, p) in self.positions.iter().enumerate() {
+        for (i, p) in self.positions().iter().enumerate() {
             s[i] = match p {
                 Some(c) => match c {
                     Color::Black => 'K',
@@ -907,7 +911,7 @@ mod test {
                             p = p + 1;
                         }
                     )*
-                    assert_eq!(BoardState::from_str($s).unwrap().positions, positions, "input={} actual={:?}", $s, positions);
+                    assert_eq!(BoardState::from_str($s).unwrap().positions(), positions, "input={} actual={:?}", $s, positions);
                 }
             }
         }
