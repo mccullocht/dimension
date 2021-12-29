@@ -1,5 +1,9 @@
+#[macro_use]
+extern crate lazy_static;
+
 use itertools::Itertools;
 use std::cmp;
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt;
 use std::str::FromStr;
@@ -71,7 +75,7 @@ const BOARD_GRAPH: [PositionNode; NUM_POSITIONS] = [
 ];
 
 const NUM_SPHERE_COLORS: usize = 5;
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Color {
     Black,
     White,
@@ -79,6 +83,13 @@ pub enum Color {
     Green,
     Orange,
 }
+const ALL_COLORS: [Color; NUM_SPHERE_COLORS] = [
+    Color::Black,
+    Color::White,
+    Color::Blue,
+    Color::Green,
+    Color::Orange,
+];
 
 impl TryFrom<u8> for Color {
     type Error = &'static str;
@@ -107,7 +118,7 @@ impl From<Color> for u8 {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Constraint {
     // All spheres of these two colors must be adjacent to one another. Fmt: C1|C2
     Adjacent(Color, Color),
@@ -115,8 +126,8 @@ pub enum Constraint {
     NotAdjacent(Color, Color),
     // Exactly N of the specified color. Fmt: CNC
     Count(usize, Color),
-    // Exactly N of the sum of these two colors. Fmt: C1NC2
-    SumCount(usize, Color, Color),
+    // Exactly 4 of the sum of these two colors. Fmt: C1NC2
+    SumCount(Color, Color),
     // Spheres of this color must be below other spheres (must not be on top!) Fmt: */C
     Below(Color),
     // Spheres of this color must be above other spheres (must not be underneath!) Fmt: C/*
@@ -125,72 +136,163 @@ pub enum Constraint {
     GreaterThan(Color, Color),
 }
 
+fn get_valid_constraints() -> impl Iterator<Item = Constraint> {
+    let adjacent = ALL_COLORS
+        .iter()
+        .combinations_with_replacement(2)
+        .map(|p| Constraint::Adjacent(*p[0], *p[1]));
+    let not_adjacent = ALL_COLORS
+        .iter()
+        .combinations_with_replacement(2)
+        .map(|p| Constraint::NotAdjacent(*p[0], *p[1]));
+    let count = (1..=2)
+        .cartesian_product(ALL_COLORS.iter())
+        .map(|(n, c)| Constraint::Count(n, *c));
+    let sum_count = [
+        (Color::Black, Color::White),
+        (Color::White, Color::Orange),
+        (Color::Orange, Color::Blue),
+        (Color::Blue, Color::Green),
+        (Color::Green, Color::Black),
+    ]
+    .iter()
+    .map(|(c1, c2)| Constraint::SumCount(*c1, *c2));
+    let below = ALL_COLORS.iter().map(|c| Constraint::Below(*c));
+    let above = ALL_COLORS.iter().map(|c| Constraint::Above(*c));
+    let greater_than = [
+        (Color::White, Color::Green),
+        (Color::Green, Color::Orange),
+        (Color::Orange, Color::Black),
+        (Color::Black, Color::Blue),
+        (Color::Blue, Color::White),
+    ]
+    .iter()
+    .map(|(c1, c2)| Constraint::GreaterThan(*c1, *c2));
+    return adjacent
+        .chain(not_adjacent)
+        .chain(count)
+        .chain(sum_count)
+        .chain(below)
+        .chain(above)
+        .chain(greater_than);
+}
+
+lazy_static! {
+    static ref VALID_CONSTRAINTS: HashSet<Constraint> = {
+        let mut s: HashSet<Constraint> = HashSet::new();
+        for c in get_valid_constraints() {
+            s.insert(c);
+        }
+        s
+    };
+}
+
+impl Constraint {
+    // Parses a comma separated list of constraints.
+    // TODO(trevorm): write a test for this specifically.
+    pub fn parse_list(s: &str) -> Result<Vec<Constraint>, &'static str> {
+        if s.is_empty() {
+            return Ok(Vec::new());
+        }
+        let constraints: Vec<Constraint> = s
+            .split(",")
+            .map(|e| Constraint::from_str(e))
+            .try_collect()?;
+        if constraints.iter().unique().count() == constraints.len() {
+            Ok(constraints)
+        } else {
+            Err("all constraints in list must be unique")
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        VALID_CONSTRAINTS.contains(self)
+    }
+
+    // Returns the constraint or its canonicalized form, or None if constraint isn't valid.
+    fn canonicalize(&self) -> Option<Constraint> {
+        if self.is_valid() {
+            return Some(*self);
+        }
+
+        match self {
+            // Adjacent and NotAdjacent are valid for all color combinations.
+            // The operations are commutative so swap to canonical order.
+            Constraint::Adjacent(c1, c2) => Some(Constraint::Adjacent(*c2, *c1)),
+            Constraint::NotAdjacent(c1, c2) => Some(Constraint::NotAdjacent(*c2, *c1)),
+            // Not all color combinations are valid. Try swapping to see if it is canonical
+            // otherwise fail.
+            Constraint::SumCount(c1, c2) => {
+                let c = Constraint::SumCount(*c2, *c1);
+                if c.is_valid() {
+                    Some(c)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
 fn parse_two_colors(one: u8, two: u8) -> Result<(Color, Color), &'static str> {
-    let c1 = Color::try_from(one);
-    if c1.is_err() {
-        return Err(c1.err().unwrap());
-    }
-    let c2 = Color::try_from(two);
-    if c2.is_err() {
-        return Err(c2.err().unwrap());
-    }
-    return Ok((c1.unwrap(), c2.unwrap()));
+    let c1 = Color::try_from(one)?;
+    let c2 = Color::try_from(two)?;
+    return Ok((c1, c2));
 }
 
 impl FromStr for Constraint {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() != 3 {
-            return Err("constraints are 3 characters long");
+        if s.is_empty() {
+            return Err("constraint may not be empty");
         }
 
         let v: Vec<u8> = s.bytes().collect();
-        match v[1] {
-            b'|' => match parse_two_colors(v[0], v[2]) {
-                Ok((c1, c2)) => Ok(Constraint::Adjacent(c1, c2)),
-                Err(e) => Err(e),
-            },
-            b'x' => match parse_two_colors(v[0], v[2]) {
-                Ok((c1, c2)) => Ok(Constraint::NotAdjacent(c1, c2)),
-                Err(e) => Err(e),
-            },
-            b'1'..=b'6' => {
-                let n = v[1] - b'0';
-                match parse_two_colors(v[0], v[2]) {
-                    Ok((c1, c2)) => {
-                        if c1 != c2 {
-                            Ok(Constraint::SumCount(n as usize, c1, c2))
-                        } else if n <= 3 {
-                            Ok(Constraint::Count(n as usize, c1))
-                        } else {
-                            Err("unknown constraint operator")
-                        }
-                    }
-                    Err(e) => Err(e),
-                }
+        if v.len() == 1 {
+            let c = Color::try_from(v[0])?;
+            return Ok(Constraint::Count(1, c));
+        }
+
+        if v.len() == 2 {
+            let (c1, c2) = parse_two_colors(v[0], v[1])?;
+            if c1 == c2 {
+                return Ok(Constraint::Count(2, c1));
+            } else {
+                return Constraint::SumCount(c1, c2)
+                    .canonicalize()
+                    .ok_or("Not a valid constraint");
+            }
+        }
+
+        let c = match v[1] {
+            b'|' => {
+                let (c1, c2) = parse_two_colors(v[0], v[2])?;
+                Ok(Constraint::Adjacent(c1, c2))
+            }
+            b'x' => {
+                let (c1, c2) = parse_two_colors(v[0], v[2])?;
+                Ok(Constraint::NotAdjacent(c1, c2))
             }
             b'/' => {
                 if v[0] == b'*' {
-                    match Color::try_from(v[2]) {
-                        Ok(c) => Ok(Constraint::Below(c)),
-                        Err(e) => Err(e),
-                    }
+                    let c = Color::try_from(v[2])?;
+                    Ok(Constraint::Below(c))
                 } else if v[2] == b'*' {
-                    match Color::try_from(v[0]) {
-                        Ok(c) => Ok(Constraint::Above(c)),
-                        Err(e) => Err(e),
-                    }
+                    let c = Color::try_from(v[0])?;
+                    Ok(Constraint::Above(c))
                 } else {
                     Err("below/above constraints must have exactly one wildcard [*]")
                 }
             }
-            b'>' => match parse_two_colors(v[0], v[2]) {
-                Ok((c1, c2)) => Ok(Constraint::GreaterThan(c1, c2)),
-                Err(e) => Err(e),
-            },
+            b'>' => {
+                let (c1, c2) = parse_two_colors(v[0], v[2])?;
+                Ok(Constraint::GreaterThan(c1, c2))
+            }
             _ => Err("unknown constraint operator"),
-        }
+        }?;
+        c.canonicalize().ok_or("Not a valid constraint")
     }
 }
 
@@ -253,20 +355,14 @@ impl ColorMix {
     fn matches_constraint(&self, constraint: &Constraint) -> bool {
         match constraint {
             Constraint::Adjacent(color1, color2) => {
-                if *color1 == *color2 {
-                    let c = self.counts[*color1 as usize];
-                    // There must be zero or 2+ to fulfill this constraint.
-                    c == 0 || c > 1
-                } else {
-                    let c1 = self.counts[*color1 as usize];
-                    let c2 = self.counts[*color2 as usize];
-                    // To be adjacent there must be 0 of both or more than 0 of both.
-                    (c1 == 0 && c2 == 0) || (c1 > 0 && c2 > 0)
-                }
+                // If both colors are placed they must be adjacent. Any board with just one color
+                // passes; if the colors are the same there must be 0 or 2+
+                *color1 != *color2 || self.counts[*color1 as usize] != 1
             }
+            // TODO(trevorm): this is incorrect when there is both Count(1, _) and Count(2, _)
             Constraint::Count(count, color) => self.counts[*color as usize] == *count,
-            Constraint::SumCount(count, color1, color2) => {
-                self.counts[*color1 as usize] + self.counts[*color2 as usize] == *count
+            Constraint::SumCount(color1, color2) => {
+                self.counts[*color1 as usize] + self.counts[*color2 as usize] == 4
             }
             Constraint::GreaterThan(color1, color2) => {
                 self.counts[*color1 as usize] > self.counts[*color2 as usize]
@@ -546,8 +642,10 @@ impl BoardState {
             Constraint::Adjacent(color1, color2) => {
                 let c1 = self.color(*color1);
                 let c2 = self.color(*color2);
-                c1.positions & c2.adjacent == c1.positions
-                    && c2.positions & c1.adjacent == c2.positions
+                c1.positions == 0
+                    || c2.positions == 0
+                    || (c1.positions & c2.adjacent == c1.positions
+                        && c2.positions & c1.adjacent == c2.positions)
             }
             Constraint::NotAdjacent(color1, color2) => {
                 let c1 = self.color(*color1);
@@ -556,8 +654,8 @@ impl BoardState {
                     && c2.positions & !c1.adjacent == c2.positions
             }
             Constraint::Count(count, color) => self.color(*color).count() == *count,
-            Constraint::SumCount(count, color1, color2) => {
-                self.color(*color1).count() + self.color(*color2).count() == *count
+            Constraint::SumCount(color1, color2) => {
+                self.color(*color1).count() + self.color(*color2).count() == 4
             }
             Constraint::Below(color) => {
                 let color_positions = self.color(*color).positions;
@@ -678,22 +776,8 @@ pub trait BoardStateIterator: Iterator {
 impl<I: Iterator<Item = Vec<Option<Color>>>> BoardStateIterator for I {}
 
 mod test {
+    #[allow(unused_imports)]
     use super::*;
-
-    #[allow(dead_code)]
-    fn parse_constraints(s: &str) -> Vec<Constraint> {
-        let mut out = Vec::<Constraint>::new();
-        if s.is_empty() {
-            return out;
-        }
-        for x in s.split(',') {
-            match Constraint::from_str(x) {
-                Ok(c) => out.push(c),
-                Err(e) => assert!(false, "Could not parse constraint {}: {}", x, e),
-            }
-        }
-        out
-    }
 
     #[test]
     fn validate_board_graph() {
@@ -715,82 +799,134 @@ mod test {
         #[allow(unused_imports)]
         use super::*;
 
-        macro_rules! test {
-            ($name: ident, $s: expr, $c: expr) => {
-                #[test]
-                fn $name() {
-                    assert_eq!(Constraint::from_str($s), $c);
-                }
-            };
+        mod canonicalize {
+            #[allow(unused_imports)]
+            use super::*;
+
+            macro_rules! test {
+                ($name: ident, $input: expr) => {
+                    test!($name, $input, Some($input));
+                };
+                ($name: ident, $input: expr, $output: expr) => {
+                    #[test]
+                    fn $name() {
+                        assert_eq!($input.canonicalize(), $output);
+                    }
+                };
+            }
+
+            test!(adjacent, Constraint::Adjacent(Color::Blue, Color::Green));
+            test!(
+                adjacent_non_canonical,
+                Constraint::Adjacent(Color::Green, Color::Blue),
+                Some(Constraint::Adjacent(Color::Blue, Color::Green))
+            );
+            test!(
+                not_adjacent,
+                Constraint::NotAdjacent(Color::Blue, Color::Green)
+            );
+            test!(
+                not_adjacent_non_canonical,
+                Constraint::NotAdjacent(Color::Green, Color::Blue),
+                Some(Constraint::NotAdjacent(Color::Blue, Color::Green))
+            );
+            test!(sum_count, Constraint::SumCount(Color::Blue, Color::Green));
+            test!(
+                sum_count_non_canonical,
+                Constraint::SumCount(Color::Green, Color::Blue),
+                Some(Constraint::SumCount(Color::Blue, Color::Green))
+            );
+            test!(
+                sum_count_invalid,
+                Constraint::SumCount(Color::Green, Color::White),
+                None
+            );
+            test!(
+                greater_than,
+                Constraint::GreaterThan(Color::Blue, Color::White)
+            );
+            test!(
+                greater_than_invalid,
+                Constraint::GreaterThan(Color::White, Color::Blue),
+                None
+            );
+            test!(count, Constraint::Count(1, Color::Blue));
+            test!(below, Constraint::Below(Color::Blue));
+            test!(above, Constraint::Above(Color::Blue));
         }
 
-        test!(
-            adjacent1,
-            "K|W",
-            Ok(Constraint::Adjacent(Color::Black, Color::White))
-        );
-        test!(
-            adjacent2,
-            "W|B",
-            Ok(Constraint::Adjacent(Color::White, Color::Blue))
-        );
-        test!(
-            adjacent3,
-            "O|G",
-            Ok(Constraint::Adjacent(Color::Orange, Color::Green))
-        );
-        test!(
-            not_adjacent1,
-            "KxW",
-            Ok(Constraint::NotAdjacent(Color::Black, Color::White))
-        );
-        test!(
-            not_adjacent2,
-            "WxB",
-            Ok(Constraint::NotAdjacent(Color::White, Color::Blue))
-        );
-        test!(
-            not_adjacent3,
-            "OxG",
-            Ok(Constraint::NotAdjacent(Color::Orange, Color::Green))
-        );
-        test!(count1, "K1K", Ok(Constraint::Count(1, Color::Black)));
-        test!(count2, "W2W", Ok(Constraint::Count(2, Color::White)));
-        test!(count3, "O3O", Ok(Constraint::Count(3, Color::Orange)));
-        test!(count_0, "G0G", Err("unknown constraint operator"));
-        test!(count_4, "G4G", Err("unknown constraint operator"));
-        test!(
-            sum_count1,
-            "K1W",
-            Ok(Constraint::SumCount(1, Color::Black, Color::White))
-        );
-        test!(
-            sum_count4,
-            "B4O",
-            Ok(Constraint::SumCount(4, Color::Blue, Color::Orange))
-        );
-        test!(
-            sum_count5,
-            "G5B",
-            Ok(Constraint::SumCount(5, Color::Green, Color::Blue))
-        );
-        test!(
-            sum_count6,
-            "G6O",
-            Ok(Constraint::SumCount(6, Color::Green, Color::Orange))
-        );
-        test!(sum_count0, "K0W", Err("unknown constraint operator"));
-        test!(sum_count7, "K7W", Err("unknown constraint operator"));
-        test!(below1, "*/K", Ok(Constraint::Below(Color::Black)));
-        test!(below2, "*/O", Ok(Constraint::Below(Color::Orange)));
-        test!(above1, "W/*", Ok(Constraint::Above(Color::White)));
-        test!(above2, "G/*", Ok(Constraint::Above(Color::Green)));
-        test!(
-            above_below_invalid,
-            "B/W",
-            Err("below/above constraints must have exactly one wildcard [*]")
-        );
-        test!(not_an_operator, "K-W", Err("unknown constraint operator"));
+        mod from_str {
+            #[allow(unused_imports)]
+            use super::*;
+
+            macro_rules! test {
+                ($name: ident, $s: expr, $c: expr) => {
+                    #[test]
+                    fn $name() {
+                        assert_eq!(Constraint::from_str($s), $c);
+                    }
+                };
+            }
+
+            test!(
+                adjacent1,
+                "K|W",
+                Ok(Constraint::Adjacent(Color::Black, Color::White))
+            );
+            test!(
+                adjacent2,
+                "W|B",
+                Ok(Constraint::Adjacent(Color::White, Color::Blue))
+            );
+            test!(
+                adjacent3,
+                "O|G",
+                Ok(Constraint::Adjacent(Color::Green, Color::Orange))
+            );
+            test!(
+                not_adjacent1,
+                "KxW",
+                Ok(Constraint::NotAdjacent(Color::Black, Color::White))
+            );
+            test!(
+                not_adjacent2,
+                "WxB",
+                Ok(Constraint::NotAdjacent(Color::White, Color::Blue))
+            );
+            test!(
+                not_adjacent3,
+                "OxG",
+                Ok(Constraint::NotAdjacent(Color::Green, Color::Orange))
+            );
+            test!(count1, "K", Ok(Constraint::Count(1, Color::Black)));
+            test!(count2, "WW", Ok(Constraint::Count(2, Color::White)));
+            test!(
+                count1_invalid,
+                "X",
+                Err("Not a valid Color. Must be in [KWBOG]")
+            );
+            test!(
+                count2_invalid,
+                "KX",
+                Err("Not a valid Color. Must be in [KWBOG]")
+            );
+            test!(
+                sum_count,
+                "BG",
+                Ok(Constraint::SumCount(Color::Blue, Color::Green))
+            );
+            test!(sum_count_invalid, "KO", Err("Not a valid constraint"));
+            test!(below1, "*/K", Ok(Constraint::Below(Color::Black)));
+            test!(below2, "*/O", Ok(Constraint::Below(Color::Orange)));
+            test!(above1, "W/*", Ok(Constraint::Above(Color::White)));
+            test!(above2, "G/*", Ok(Constraint::Above(Color::Green)));
+            test!(
+                above_below_invalid,
+                "B/W",
+                Err("below/above constraints must have exactly one wildcard [*]")
+            );
+            test!(not_an_operator, "K-W", Err("unknown constraint operator"));
+        }
     }
 
     mod board_score {
@@ -833,18 +969,18 @@ mod test {
             ($name:ident, $s:expr, $c:expr, $score:expr) => {
                 #[test]
                 fn $name() {
-                    let mix = ColorMix::from_str($s);
-                    let constraints = parse_constraints($c);
-                    assert_eq!(mix.unwrap().approximate_score(&constraints).score, $score);
+                    let mix = ColorMix::from_str($s).unwrap();
+                    let constraints = Constraint::parse_list($c).unwrap();
+                    assert_eq!(mix.approximate_score(&constraints).score, $score);
                 }
             };
             ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
                 #[test]
                 fn $name() {
-                    let mix = ColorMix::from_str($s);
-                    let constraints = parse_constraints($c);
+                    let mix = ColorMix::from_str($s).unwrap();
+                    let constraints = Constraint::parse_list($c).unwrap();
                     assert_eq!(
-                        mix.unwrap().approximate_score(&constraints),
+                        mix.approximate_score(&constraints),
                         BoardScore {
                             score: $score,
                             flag: $flag
@@ -854,8 +990,10 @@ mod test {
             };
         }
 
-        test!(adjacent1, "KOBG", "K|W", 2);
-        test!(adjacent2, "WOBG", "K|W", 2);
+        // Passes because there are no white spheres.
+        test!(adjacent1, "KOBG", "K|W", 4);
+        // Passes because there are no black spheres.
+        test!(adjacent2, "WOBG", "K|W", 4);
         test!(adjacent3, "KWOBG", "K|W", 5);
         // This one isn't adjacent but if you're only looking at counts it's fine.
         test!(adjacent4, "GWWOKB", "K|W", 6);
@@ -869,17 +1007,16 @@ mod test {
         test!(adjacent8, "WKOBGK", "K|K", 6);
         test!(not_adjacent1, "KWKWKW", "KxW", 6);
         test!(not_adjacent2, "GKKWW", "KxW", 5);
-        test!(count1, "B", "B2B", 0);
-        test!(count2, "BK", "B2B", 0);
-        test!(count3, "BKK", "B2B", 1);
-        test!(count4, "BKKB", "B2B", 4);
-        test!(count5, "BKKBB", "B2B", 3);
-        test!(sum_count1, "B", "B2K", 0);
-        test!(sum_count2, "BK", "B2K", 2);
-        test!(sum_count3, "BKW", "B2K", 3);
-        test!(sum_count4, "BKWB", "B2K", 2);
-        test!(sum_count5, "BKWK", "B2K", 2);
-        test!(sum_count6, "BKW", "K2B", 3);
+        test!(count1, "B", "BB", 0);
+        test!(count2, "BK", "BB", 0);
+        test!(count3, "BKK", "BB", 1);
+        test!(count4, "BKKB", "BB", 4);
+        test!(count5, "BKKBB", "BB", 3);
+        test!(sum_count1, "B", "BO", 0);
+        test!(sum_count2, "BOBO", "BO", 4);
+        test!(sum_count3, "BOBOW", "BO", 5);
+        test!(sum_count4, "BOWB", "BO", 2);
+        test!(sum_count5, "BOWO", "BO", 2);
         test!(below1, "WWW", "*/W", 3);
         test!(below2, "WWWB", "*/W", 4);
         test!(above1, "WWW", "W/*", 3);
@@ -891,7 +1028,7 @@ mod test {
         test!(greater_than5, "GWOOG", "G>O", 3);
         test!(greater_than6, "GWOOGG", "G>O", 6);
         test!(flag_trivial, "KWBOG", "", 5, true);
-        test!(flag_constraint, "KWBOG", "K1K", 5, true);
+        test!(flag_constraint, "KWBOG", "K", 5, true);
     }
 
     mod board_state_from_str {
@@ -1044,18 +1181,18 @@ mod test {
             ($name:ident, $s:expr, $c:expr, $score:expr) => {
                 #[test]
                 fn $name() {
-                    let state = BoardState::from_str($s);
-                    let constraints = parse_constraints($c);
-                    assert_eq!(state.unwrap().score(&constraints).score, $score);
+                    let state = BoardState::from_str($s).unwrap();
+                    let constraints = Constraint::parse_list($c).unwrap();
+                    assert_eq!(state.score(&constraints).score, $score);
                 }
             };
             ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
                 #[test]
                 fn $name() {
-                    let state = BoardState::from_str($s);
-                    let constraints = parse_constraints($c);
+                    let state = BoardState::from_str($s).unwrap();
+                    let constraints = Constraint::parse_list($c).unwrap();
                     assert_eq!(
-                        state.unwrap().score(&constraints),
+                        state.score(&constraints),
                         BoardScore {
                             score: $score,
                             flag: $flag
@@ -1069,21 +1206,21 @@ mod test {
         test!(adjacent2, ".KWKWKW", "W|K", 6);
         test!(adjacent3, "GKWKWKGOOOW", "K|W", 9);
         test!(adjacent4, "GKWKWKGOOOW", "W|K", 9);
+        test!(adjacent5, "GGGKKKOOOBB", "K|W", 11);
         test!(not_adjacent1, ".KWKWKW", "KxW", 4);
         test!(not_adjacent2, ".KWKWKW", "WxK", 4);
         test!(not_adjacent3, "GKK.WW", "KxW", 5);
         test!(not_adjacent4, "GKK.WW", "WxK", 5);
-        test!(count1, "B", "B2B", 0);
-        test!(count2, "BK", "B2B", 0);
-        test!(count3, "BKK", "B2B", 1);
-        test!(count4, "BKKB", "B2B", 4);
-        test!(count5, "BKKBB", "B2B", 3);
-        test!(sum_count1, "B", "B2K", 0);
-        test!(sum_count2, "BK", "B2K", 2);
-        test!(sum_count3, "BKW", "B2K", 3);
-        test!(sum_count4, "BKWB", "B2K", 2);
-        test!(sum_count5, "BKWK", "B2K", 2);
-        test!(sum_count6, "BKW", "K2B", 3);
+        test!(count1, "B", "BB", 0);
+        test!(count2, "BK", "BB", 0);
+        test!(count3, "BKK", "BB", 1);
+        test!(count4, "BKKB", "BB", 4);
+        test!(count5, "BKKBB", "BB", 3);
+        test!(sum_count1, "B", "BO", 0);
+        test!(sum_count2, "BOBO", "BO", 4);
+        test!(sum_count3, "BOBOW", "BO", 5);
+        test!(sum_count4, "BOWB", "BO", 2);
+        test!(sum_count5, "BOWO", "BO", 2);
         test!(below1, "WWW", "*/W", 1);
         test!(below2, "WWW....B", "*/W", 4);
         test!(below3, "KWWW...B", "*/W", 3);
@@ -1102,6 +1239,6 @@ mod test {
         test!(greater_than5, "GWOOG", "G>O", 3);
         test!(greater_than6, "GWOOGG", "G>O", 6);
         test!(flag_trivial, "KWBOG", "", 5, true);
-        test!(flag_constraint, "KWBOG", "K1K", 5, true);
+        test!(flag_constraint, "KWBOG", "K", 5, true);
     }
 }

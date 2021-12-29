@@ -37,12 +37,12 @@ const SCORE_DATA: [ScoreBenchmarkData; 2] = [
     ScoreBenchmarkData {
         name: "2",
         board: "KKKWWBBGGOO",
-        constraints: "K3K,W4O",
+        constraints: "BB,WO",
     },
     ScoreBenchmarkData {
         name: "6",
         board: "BGGGOOOWWWK",
-        constraints: "KxB,K/*,*/B,W4K,B1B,B|G",
+        constraints: "KxB,K/*,*/B,WK,B,B|G",
     },
 ];
 
