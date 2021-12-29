@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use dimension::{BoardState, Color, ColorMix, Constraint};
+use dimension::{BoardState, Color, ColorMix, Constraint, ConstraintSet};
 use pprof::criterion::{Output, PProfProfiler};
 use std::convert::TryFrom;
 use std::str::FromStr;
@@ -50,7 +50,9 @@ fn bm_score(c: &mut Criterion) {
     let mut group = c.benchmark_group("score");
     for d in SCORE_DATA.iter() {
         let board = BoardState::from_str(d.board).unwrap();
-        let constraints = parse_constraints(d.constraints);
+        let constraints = ConstraintSet::with_constraints(
+            &Constraint::parse_list(d.constraints).expect(d.constraints),
+        );
         group.bench_with_input(BenchmarkId::from_parameter(d.name), &d, |b, _d| {
             b.iter(|| assert!(board.score(&constraints).score > 0));
         });

@@ -3,7 +3,7 @@ extern crate lazy_static;
 
 use itertools::Itertools;
 use std::cmp;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::fmt;
 use std::str::FromStr;
@@ -118,7 +118,14 @@ impl From<Color> for u8 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+impl From<Color> for char {
+    fn from(value: Color) -> char {
+        u8::from(value) as char
+    }
+}
+
+// TODO(trevorm): move Constraint and ConstraintSet to another file.
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Constraint {
     // All spheres of these two colors must be adjacent to one another. Fmt: C1|C2
     Adjacent(Color, Color),
@@ -189,7 +196,8 @@ lazy_static! {
 
 impl Constraint {
     // Parses a comma separated list of constraints.
-    // TODO(trevorm): write a test for this specifically.
+    // TODO(trevorm): consider altering return type to String and noting the failed
+    // constraint in the parse.
     pub fn parse_list(s: &str) -> Result<Vec<Constraint>, &'static str> {
         if s.is_empty() {
             return Ok(Vec::new());
@@ -231,6 +239,36 @@ impl Constraint {
                 }
             }
             _ => None,
+        }
+    }
+
+    // Weight for use in scoring. Typically 1, but 2 for Count(3, C) since it's always a
+    // combination of Count(1, C) and Count(2, C).
+    fn weight(&self) -> usize {
+        match self {
+            Constraint::Count(n, _) => {
+                if *n == 3 {
+                    2
+                } else {
+                    1
+                }
+            }
+            _ => 1,
+        }
+    }
+
+    // Return a Constraint that can be used as a map key to find conflicts. This covers direct
+    // conflicts (inverse condition or same condition with different parameters). This does not
+    // cover indirect conflicts. A non-exhaustive list of such conflicts:
+    // * GreaterThan(C, D) -- Count(3, D)
+    // * Adjacent(C, C) -- Count(1, C)
+    // Both of these are well-handled by existing optimizations.
+    fn conflict_key(&self) -> Constraint {
+        match self {
+            Constraint::NotAdjacent(c1, c2) => Constraint::Adjacent(*c1, *c2),
+            Constraint::Count(_, c) => Constraint::Count(0, *c),
+            Constraint::Above(c) => Constraint::Below(*c),
+            _ => *self,
         }
     }
 }
@@ -296,6 +334,112 @@ impl FromStr for Constraint {
     }
 }
 
+impl fmt::Display for Constraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Constraint::Adjacent(c1, c2) => write!(f, "{}|{}", char::from(*c1), char::from(*c2)),
+            Constraint::NotAdjacent(c1, c2) => write!(f, "{}x{}", char::from(*c1), char::from(*c2)),
+            Constraint::Count(n, c) => {
+                write!(
+                    f,
+                    "{}",
+                    std::iter::repeat(char::from(*c))
+                        .take(*n)
+                        .collect::<String>()
+                )
+            }
+            Constraint::SumCount(c1, c2) => write!(f, "{}{}", char::from(*c1), char::from(*c2)),
+            Constraint::Below(c) => write!(f, "*/{}", char::from(*c)),
+            Constraint::Above(c) => write!(f, "{}/*", char::from(*c)),
+            Constraint::GreaterThan(c1, c2) => write!(f, "{}>{}", char::from(*c1), char::from(*c2)),
+        }
+    }
+}
+
+pub struct ConstraintSet {
+    scoring: Vec<Constraint>,
+    dropped: Vec<Constraint>,
+    total_weight: usize,
+    max_weight: usize,
+}
+
+// TODO(trevorm): convenience method? from_str()?
+impl ConstraintSet {
+    // REQUIRES: no duplicates within constraints. This is true if constraints were generated
+    // using Constraint::parse_list().
+    pub fn with_constraints(constraints: &[Constraint]) -> ConstraintSet {
+        let mut conflict_map: HashMap<Constraint, Vec<Constraint>> =
+            HashMap::with_capacity(constraints.len());
+        for c in constraints {
+            conflict_map
+                .entry(c.conflict_key())
+                .or_insert(Vec::new())
+                .push(*c);
+        }
+
+        let mut scoring: Vec<Constraint> = Vec::with_capacity(constraints.len());
+        let mut dropped: Vec<Constraint> = Vec::new();
+        for (conflict_key, mut conflict_constraints) in conflict_map.into_iter() {
+            if conflict_constraints.len() == 1 {
+                scoring.push(conflict_constraints[0]);
+                continue;
+            }
+
+            // Based on Constraint.conflict_key() and disallowing duplicates it should not be
+            // possible to have more than two constraints.
+            debug_assert!(conflict_constraints.len() == 2);
+            conflict_constraints.sort();
+            match conflict_key {
+                Constraint::Count(_, c) => scoring.push(Constraint::Count(3, c)),
+                _ => {
+                    scoring.push(conflict_constraints[0]);
+                    dropped.push(conflict_constraints[1]);
+                }
+            }
+        }
+        scoring.sort();
+        dropped.sort();
+        let dropped_weight = dropped.iter().map(|c| c.weight()).sum::<usize>();
+        ConstraintSet {
+            scoring: scoring,
+            dropped: dropped,
+            total_weight: constraints.len(),
+            max_weight: constraints.len() - dropped_weight,
+        }
+    }
+
+    pub fn scoring_constraints(&self) -> &[Constraint] {
+        &self.scoring
+    }
+
+    pub fn dropped_constraints(&self) -> &[Constraint] {
+        &self.dropped
+    }
+
+    // Compute BoardScore for these constraints with scoring output.
+    pub fn compute_score(
+        &self,
+        num_spheres: usize,
+        matching_weight: usize,
+        has_all_colors: bool,
+    ) -> BoardScore {
+        let penalty = (self.total_weight - matching_weight) * 2;
+        BoardScore {
+            score: if num_spheres > penalty {
+                num_spheres - penalty
+            } else {
+                0
+            },
+            flag: penalty == 0 && has_all_colors,
+        }
+    }
+
+    // Compute maximum possible BoardScore given these constraints.
+    pub fn max_score(&self, num_spheres: usize) -> BoardScore {
+        self.compute_score(num_spheres, self.max_weight, true)
+    }
+}
+
 #[derive(Debug)]
 pub struct ColorMix {
     counts: [usize; NUM_SPHERE_COLORS],
@@ -348,18 +492,17 @@ impl ColorMix {
     pub fn approximate_matching_constraints(&self, constraints: &[Constraint]) -> usize {
         return constraints
             .iter()
-            .filter(|&c| self.matches_constraint(&c))
-            .count();
+            .map(|&c| self.matches_constraint(&c))
+            .sum();
     }
 
-    fn matches_constraint(&self, constraint: &Constraint) -> bool {
-        match constraint {
+    fn matches_constraint(&self, constraint: &Constraint) -> usize {
+        let m: bool = match constraint {
             Constraint::Adjacent(color1, color2) => {
                 // If both colors are placed they must be adjacent. Any board with just one color
                 // passes; if the colors are the same there must be 0 or 2+
                 *color1 != *color2 || self.counts[*color1 as usize] != 1
             }
-            // TODO(trevorm): this is incorrect when there is both Count(1, _) and Count(2, _)
             Constraint::Count(count, color) => self.counts[*color as usize] == *count,
             Constraint::SumCount(color1, color2) => {
                 self.counts[*color1 as usize] + self.counts[*color2 as usize] == 4
@@ -373,14 +516,18 @@ impl ColorMix {
             Constraint::NotAdjacent(_, _) => true,
             Constraint::Below(_) => true,
             Constraint::Above(_) => true,
+        };
+        if m {
+            constraint.weight()
+        } else {
+            0
         }
     }
 
-    pub fn approximate_score(&self, constraints: &[Constraint]) -> BoardScore {
-        let matching = self.approximate_matching_constraints(constraints);
-        BoardScore::with_state(
+    pub fn approximate_score(&self, constraints: &ConstraintSet) -> BoardScore {
+        constraints.compute_score(
             self.num_spheres(),
-            constraints.len() - matching,
+            self.approximate_matching_constraints(constraints.scoring_constraints()),
             self.has_all_colors(),
         )
     }
@@ -465,7 +612,7 @@ impl Default for ColorInfo {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct BoardScore {
     // Score in [0,11]
     pub score: usize,
@@ -479,21 +626,6 @@ impl BoardScore {
             score: score,
             flag: flag,
         }
-    }
-
-    // XXX there's got to be a better way.
-    // total      -- the number of spheres in the board state.
-    // invalid    -- number of non-matching constraints.
-    // all_colors -- true if all colors have at least one sphere.
-    pub fn with_state(total: usize, invalid: usize, all_colors: bool) -> BoardScore {
-        BoardScore::new(
-            if invalid * 2 < total {
-                total - (invalid * 2)
-            } else {
-                0
-            },
-            invalid == 0 && all_colors,
-        )
     }
 }
 
@@ -519,8 +651,6 @@ impl PartialOrd for BoardScore {
         Some(self.cmp(&other))
     }
 }
-
-impl Eq for BoardScore {}
 
 impl fmt::Display for BoardScore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -572,7 +702,15 @@ impl BoardState {
     pub fn permutations_from_color_mix(mix: &ColorMix) -> impl Iterator<Item = BoardState> {
         let positions: Vec<Option<Color>> =
             BoardState::from(mix).positions().iter().copied().collect();
-        positions.into_iter().permutations(11).as_board_state()
+        // If we have less than 11 spheres we may be able to run fewer permutations on the
+        // beginning of the array ("lower" spheres), which will skip permutations that
+        // produce invalid board states.
+        let p = match mix.num_spheres() {
+            0..=3 => 7,   // need at least 4 spheres to stack anything, ~5K permutations.
+            4..=10 => 10, // top sphere cannot be stacked, ~3.6M permutations.
+            _ => 11,      // ~40M permutations.
+        };
+        positions.into_iter().permutations(p).as_board_state()
     }
 
     fn add_position(&mut self, color: Option<Color>, index: usize) {
@@ -614,21 +752,17 @@ impl BoardState {
         self.positions & self.below == self.below && self.color_info.iter().all(|&c| c.count() <= 3)
     }
 
-    pub fn score(&self, constraints: &[Constraint]) -> BoardScore {
-        if !self.is_valid() {
-            return BoardScore::default();
-        }
-
-        let invalid = constraints.iter().fold(0, |acc, &c| {
-            if self.matches_constraint(&c) {
-                acc
-            } else {
-                acc + 1
-            }
-        });
-        BoardScore::with_state(
+    pub fn score(&self, constraints: &ConstraintSet) -> BoardScore {
+        // Factory functions do not allow construction of invalid boards.
+        debug_assert!(self.is_valid());
+        let matching = constraints
+            .scoring_constraints()
+            .iter()
+            .map(|c| self.matches_constraint(c))
+            .sum();
+        constraints.compute_score(
             self.num_spheres(),
-            invalid,
+            matching,
             self.color_info.iter().all(|&c| c.positions > 0),
         )
     }
@@ -637,8 +771,8 @@ impl BoardState {
         self.color_info[c as usize]
     }
 
-    fn matches_constraint(&self, constraint: &Constraint) -> bool {
-        match constraint {
+    fn matches_constraint(&self, constraint: &Constraint) -> usize {
+        let f: bool = match constraint {
             Constraint::Adjacent(color1, color2) => {
                 let c1 = self.color(*color1);
                 let c2 = self.color(*color2);
@@ -665,6 +799,11 @@ impl BoardState {
             Constraint::GreaterThan(color1, color2) => {
                 self.color(*color1).count() > self.color(*color2).count()
             }
+        };
+        if f {
+            constraint.weight()
+        } else {
+            0
         }
     }
 }
@@ -795,7 +934,7 @@ mod test {
         }
     }
 
-    mod constraint_from_str {
+    mod constraint {
         #[allow(unused_imports)]
         use super::*;
 
@@ -855,15 +994,22 @@ mod test {
             test!(above, Constraint::Above(Color::Blue));
         }
 
-        mod from_str {
+        mod serde {
             #[allow(unused_imports)]
             use super::*;
 
             macro_rules! test {
                 ($name: ident, $s: expr, $c: expr) => {
+                    test!($name, $s, $c, $s);
+                };
+                ($name: ident, $s: expr, $c: expr, $es: expr) => {
                     #[test]
                     fn $name() {
-                        assert_eq!(Constraint::from_str($s), $c);
+                        let constraint = Constraint::from_str($s);
+                        assert_eq!(constraint, $c);
+                        if constraint.is_ok() {
+                            assert_eq!(format!("{}", constraint.unwrap()), $es);
+                        }
                     }
                 };
             }
@@ -875,13 +1021,9 @@ mod test {
             );
             test!(
                 adjacent2,
-                "W|B",
-                Ok(Constraint::Adjacent(Color::White, Color::Blue))
-            );
-            test!(
-                adjacent3,
                 "O|G",
-                Ok(Constraint::Adjacent(Color::Green, Color::Orange))
+                Ok(Constraint::Adjacent(Color::Green, Color::Orange)),
+                "G|O"
             );
             test!(
                 not_adjacent1,
@@ -890,13 +1032,9 @@ mod test {
             );
             test!(
                 not_adjacent2,
-                "WxB",
-                Ok(Constraint::NotAdjacent(Color::White, Color::Blue))
-            );
-            test!(
-                not_adjacent3,
                 "OxG",
-                Ok(Constraint::NotAdjacent(Color::Green, Color::Orange))
+                Ok(Constraint::NotAdjacent(Color::Green, Color::Orange)),
+                "GxO"
             );
             test!(count1, "K", Ok(Constraint::Count(1, Color::Black)));
             test!(count2, "WW", Ok(Constraint::Count(2, Color::White)));
@@ -911,9 +1049,15 @@ mod test {
                 Err("Not a valid Color. Must be in [KWBOG]")
             );
             test!(
-                sum_count,
+                sum_count1,
                 "BG",
                 Ok(Constraint::SumCount(Color::Blue, Color::Green))
+            );
+            test!(
+                sum_count2,
+                "GB",
+                Ok(Constraint::SumCount(Color::Blue, Color::Green)),
+                "BG"
             );
             test!(sum_count_invalid, "KO", Err("Not a valid constraint"));
             test!(below1, "*/K", Ok(Constraint::Below(Color::Black)));
@@ -926,6 +1070,205 @@ mod test {
                 Err("below/above constraints must have exactly one wildcard [*]")
             );
             test!(not_an_operator, "K-W", Err("unknown constraint operator"));
+        }
+
+        mod parse_list {
+            #[allow(unused_imports)]
+            use super::*;
+
+            #[test]
+            fn parse() {
+                let constraints = Constraint::parse_list("K,KK,O|G,OW,GxK,*/W").unwrap();
+                assert_eq!(
+                    constraints,
+                    &[
+                        Constraint::Count(1, Color::Black),
+                        Constraint::Count(2, Color::Black),
+                        Constraint::Adjacent(Color::Green, Color::Orange),
+                        Constraint::SumCount(Color::White, Color::Orange),
+                        Constraint::NotAdjacent(Color::Black, Color::Green),
+                        Constraint::Below(Color::White),
+                    ]
+                );
+            }
+
+            #[test]
+            fn empty() {
+                assert_eq!(Constraint::parse_list(""), Ok(Vec::new()));
+            }
+
+            #[test]
+            fn duplicate() {
+                assert_eq!(
+                    Constraint::parse_list("O|G,G|O"),
+                    Err("all constraints in list must be unique")
+                );
+            }
+
+            #[test]
+            fn invalid_constraint() {
+                assert_eq!(
+                    Constraint::parse_list("O|G,GXO"),
+                    Err("unknown constraint operator")
+                );
+            }
+        }
+
+        mod weight {
+            #[allow(unused_imports)]
+            use super::*;
+
+            #[test]
+            fn count() {
+                assert_eq!(Constraint::Count(1, Color::Blue).weight(), 1);
+                assert_eq!(Constraint::Count(2, Color::Blue).weight(), 1);
+                assert_eq!(Constraint::Count(3, Color::Blue).weight(), 2);
+            }
+
+            #[test]
+            fn other() {
+                assert_eq!(Constraint::Adjacent(Color::Blue, Color::Blue).weight(), 1);
+            }
+        }
+
+        mod conflict_key {
+            #[allow(unused_imports)]
+            use super::*;
+
+            macro_rules! test {
+                ($name: ident, $input: expr) => {
+                    test!($name, $input, Constraint::from_str($input).expect($input));
+                };
+                ($name: ident, $input: expr, $expected: expr) => {
+                    #[test]
+                    fn $name() {
+                        let input = Constraint::from_str($input).expect($input);
+                        assert_eq!(input.conflict_key(), $expected);
+                    }
+                };
+            }
+
+            test!(adjacent, "O|G");
+            test!(
+                not_adjacent,
+                "OxG",
+                Constraint::Adjacent(Color::Green, Color::Orange)
+            );
+            test!(count, "B", Constraint::Count(0, Color::Blue));
+            test!(below, "*/B");
+            test!(above, "B/*", Constraint::Below(Color::Blue));
+            test!(sum_count, "KW");
+            test!(greater_than, "W>G");
+        }
+    }
+
+    mod constraint_set {
+        #[allow(unused_imports)]
+        use super::*;
+
+        #[allow(dead_code)]
+        fn make(constraints: &str) -> ConstraintSet {
+            let c = Constraint::parse_list(constraints).expect(constraints);
+            ConstraintSet::with_constraints(&c)
+        }
+
+        mod with_constraints {
+            #[allow(unused_imports)]
+            use super::*;
+
+            macro_rules! test {
+                ($name: ident, $input: expr, $scoring: expr) => {
+                    test!($name, $input, $scoring, []);
+                };
+                ($name: ident, $input: expr, $scoring: expr, $dropped: expr) => {
+                    #[test]
+                    fn $name() {
+                        let cs = make($input);
+                        assert_eq!(cs.scoring_constraints(), &$scoring);
+                        assert_eq!(cs.dropped_constraints(), &$dropped);
+                    }
+                };
+            }
+
+            test!(
+                basic,
+                "K,GG,O|G,OW,GxK,*/W",
+                [
+                    Constraint::Adjacent(Color::Green, Color::Orange),
+                    Constraint::NotAdjacent(Color::Black, Color::Green),
+                    Constraint::Count(1, Color::Black),
+                    Constraint::Count(2, Color::Green),
+                    Constraint::SumCount(Color::White, Color::Orange),
+                    Constraint::Below(Color::White),
+                ]
+            );
+
+            test!(count_conflict, "B,BB", [Constraint::Count(3, Color::Blue)]);
+            test!(
+                adjacent_conflict,
+                "O|G,GxO",
+                [Constraint::Adjacent(Color::Green, Color::Orange)],
+                [Constraint::NotAdjacent(Color::Green, Color::Orange)]
+            );
+            test!(
+                below_conflict,
+                "B/*,*/B",
+                [Constraint::Below(Color::Blue)],
+                [Constraint::Above(Color::Blue)]
+            );
+        }
+
+        mod compute_score {
+            #[allow(unused_imports)]
+            use super::*;
+
+            #[test]
+            fn perfect() {
+                assert_eq!(
+                    make("K,GG,O|G,OW,GxK,*/W").compute_score(11, 6, true),
+                    BoardScore::new(11, true)
+                );
+            }
+
+            #[test]
+            fn no_flag() {
+                assert_eq!(
+                    make("K,GG,O|G,OW,GxK,*/W").compute_score(11, 6, false),
+                    BoardScore::new(11, false)
+                );
+            }
+
+            #[test]
+            fn penalty() {
+                assert_eq!(
+                    make("K,GG,O|G,OW,GxK,*/W").compute_score(11, 5, true),
+                    BoardScore::new(9, false)
+                );
+            }
+
+            #[test]
+            fn wipeout_penalty() {
+                assert_eq!(
+                    make("K,GG,O|G,OW,GxK,*/W").compute_score(11, 0, true),
+                    BoardScore::new(0, false)
+                );
+            }
+
+            #[test]
+            fn max_score() {
+                assert_eq!(
+                    make("K,GG,O|G,OW,GxK,*/W").max_score(11),
+                    BoardScore::new(11, true)
+                );
+            }
+
+            #[test]
+            fn max_score_conflict() {
+                assert_eq!(
+                    make("K,GG,O|G,OW,GxO,*/W").max_score(11),
+                    BoardScore::new(9, false)
+                );
+            }
         }
     }
 
@@ -969,16 +1312,18 @@ mod test {
             ($name:ident, $s:expr, $c:expr, $score:expr) => {
                 #[test]
                 fn $name() {
-                    let mix = ColorMix::from_str($s).unwrap();
-                    let constraints = Constraint::parse_list($c).unwrap();
+                    let mix = ColorMix::from_str($s).expect($s);
+                    let constraints =
+                        ConstraintSet::with_constraints(&Constraint::parse_list($c).expect($c));
                     assert_eq!(mix.approximate_score(&constraints).score, $score);
                 }
             };
             ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
                 #[test]
                 fn $name() {
-                    let mix = ColorMix::from_str($s).unwrap();
-                    let constraints = Constraint::parse_list($c).unwrap();
+                    let mix = ColorMix::from_str($s).expect($s);
+                    let constraints =
+                        ConstraintSet::with_constraints(&Constraint::parse_list($c).expect($c));
                     assert_eq!(
                         mix.approximate_score(&constraints),
                         BoardScore {
@@ -1012,6 +1357,8 @@ mod test {
         test!(count3, "BKK", "BB", 1);
         test!(count4, "BKKB", "BB", 4);
         test!(count5, "BKKBB", "BB", 3);
+        test!(count6, "BKKBB", "B,BB", 5);
+        test!(count7, "BKKB", "B,BB", 0);
         test!(sum_count1, "B", "BO", 0);
         test!(sum_count2, "BOBO", "BO", 4);
         test!(sum_count3, "BOBOW", "BO", 5);
@@ -1181,16 +1528,18 @@ mod test {
             ($name:ident, $s:expr, $c:expr, $score:expr) => {
                 #[test]
                 fn $name() {
-                    let state = BoardState::from_str($s).unwrap();
-                    let constraints = Constraint::parse_list($c).unwrap();
+                    let state = BoardState::from_str($s).expect($s);
+                    let constraints =
+                        ConstraintSet::with_constraints(&Constraint::parse_list($c).expect($c));
                     assert_eq!(state.score(&constraints).score, $score);
                 }
             };
             ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
                 #[test]
                 fn $name() {
-                    let state = BoardState::from_str($s).unwrap();
-                    let constraints = Constraint::parse_list($c).unwrap();
+                    let state = BoardState::from_str($s).expect($s);
+                    let constraints =
+                        ConstraintSet::with_constraints(&Constraint::parse_list($c).expect($c));
                     assert_eq!(
                         state.score(&constraints),
                         BoardScore {
