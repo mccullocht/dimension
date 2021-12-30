@@ -73,6 +73,8 @@ const BOARD_GRAPH: [PositionNode; NUM_POSITIONS] = [
         adjacent: 0b01110000000,
     },
 ];
+// XXX do the below optimization for valid board state where we memoize the below value based on
+// the top 4 bits (L1/L2) sphere configuration.
 
 const NUM_SPHERE_COLORS: usize = 5;
 #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -442,7 +444,11 @@ impl ConstraintSet {
 
 #[derive(Debug)]
 pub struct ColorMix {
-    counts: [usize; NUM_SPHERE_COLORS],
+    // Pack everything into a single u32 containing 5 4-bit values.
+    // 4 bits is enough as the input will not have more than 11 input values.
+    // This is a form of vectorization that allows us to quickly compute
+    // "all values <= 3" and "all values > 0".
+    rep: u32,
 }
 
 impl ColorMix {
@@ -450,41 +456,51 @@ impl ColorMix {
         if colors.len() > NUM_POSITIONS {
             return Err("ColorMix may not have more than 11 colors");
         }
-        let mut mix = ColorMix {
-            counts: [0; NUM_SPHERE_COLORS],
-        };
+        let mut mix = ColorMix { rep: 0 };
         // Most of the cost of this method is branching in the loop. 11 is the common case
         // so we unroll it here.
         if colors.len() == 11 {
-            mix.counts[colors[0] as usize] += 1;
-            mix.counts[colors[1] as usize] += 1;
-            mix.counts[colors[2] as usize] += 1;
-            mix.counts[colors[3] as usize] += 1;
-            mix.counts[colors[4] as usize] += 1;
-            mix.counts[colors[5] as usize] += 1;
-            mix.counts[colors[6] as usize] += 1;
-            mix.counts[colors[7] as usize] += 1;
-            mix.counts[colors[8] as usize] += 1;
-            mix.counts[colors[9] as usize] += 1;
-            mix.counts[colors[10] as usize] += 1;
+            mix.add(colors[0]);
+            mix.add(colors[1]);
+            mix.add(colors[2]);
+            mix.add(colors[3]);
+            mix.add(colors[4]);
+            mix.add(colors[5]);
+            mix.add(colors[6]);
+            mix.add(colors[7]);
+            mix.add(colors[8]);
+            mix.add(colors[9]);
+            mix.add(colors[10]);
         } else {
             for c in colors {
-                mix.counts[*c as usize] += 1;
+                mix.add(*c);
             }
         }
-        if mix.counts.iter().all(|&c| c <= 3) {
+        if mix.rep & 0x33333 == mix.rep {
             Ok(mix)
         } else {
             Err("ColorMix may not have more than 3 of any color")
         }
     }
 
+    fn add(&mut self, c: Color) {
+        self.rep += 1 << (c as usize * 4)
+    }
+
+    fn count(&self, c: Color) -> usize {
+        (self.rep as usize >> (c as usize * 4)) & 0xf
+    }
+
     pub fn num_spheres(&self) -> usize {
-        self.counts.iter().sum()
+        self.count(Color::Black)
+            + self.count(Color::White)
+            + self.count(Color::Blue)
+            + self.count(Color::Green)
+            + self.count(Color::Orange)
     }
 
     pub fn has_all_colors(&self) -> bool {
-        self.counts.iter().all(|&c| c > 0)
+        (self.rep & 0x11111 | (self.rep >> 1) & 0x11111).count_ones() == 5
     }
 
     // Returns an upper bound of the number of matching constraints based entirely on the
@@ -501,15 +517,11 @@ impl ColorMix {
             Constraint::Adjacent(color1, color2) => {
                 // If both colors are placed they must be adjacent. Any board with just one color
                 // passes; if the colors are the same there must be 0 or 2+
-                *color1 != *color2 || self.counts[*color1 as usize] != 1
+                *color1 != *color2 || self.count(*color1) != 1
             }
-            Constraint::Count(count, color) => self.counts[*color as usize] == *count,
-            Constraint::SumCount(color1, color2) => {
-                self.counts[*color1 as usize] + self.counts[*color2 as usize] == 4
-            }
-            Constraint::GreaterThan(color1, color2) => {
-                self.counts[*color1 as usize] > self.counts[*color2 as usize]
-            }
+            Constraint::Count(count, color) => self.count(*color) == *count,
+            Constraint::SumCount(color1, color2) => self.count(*color1) + self.count(*color2) == 4,
+            Constraint::GreaterThan(color1, color2) => self.count(*color1) > self.count(*color2),
             // Approximations of these are too pessimistic given that we are trying
             // to compute an upper bound score. The best approximations only return true
             // when a targeted color is 0, where the flag cannot be set.
@@ -698,6 +710,17 @@ impl BoardState {
         }
     }
 
+    fn add_position(&mut self, color: Option<Color>, index: usize) {
+        match color {
+            Some(c) => {
+                self.color_info[c as usize].add(index);
+                self.positions |= 1 << index;
+                self.below |= BOARD_GRAPH[index].below;
+            }
+            None => {}
+        }
+    }
+
     // Produces all BoardState permutation from a single ColorMix.
     pub fn permutations_from_color_mix(mix: &ColorMix) -> impl Iterator<Item = BoardState> {
         let positions: Vec<Option<Color>> =
@@ -711,17 +734,6 @@ impl BoardState {
             _ => 11,      // ~40M permutations.
         };
         positions.into_iter().permutations(p).as_board_state()
-    }
-
-    fn add_position(&mut self, color: Option<Color>, index: usize) {
-        match color {
-            Some(c) => {
-                self.color_info[c as usize].add(index);
-                self.positions |= 1 << index;
-                self.below |= BOARD_GRAPH[index].below;
-            }
-            None => {}
-        }
     }
 
     pub fn num_spheres(&self) -> usize {
@@ -748,7 +760,7 @@ impl BoardState {
 
     // Returns false is this configuration is not valid (physically possible).
     // TODO(trevorm): return Result<(), &'static str> to get better error messages.
-    pub fn is_valid(&self) -> bool {
+    fn is_valid(&self) -> bool {
         self.positions & self.below == self.below && self.color_info.iter().all(|&c| c.count() <= 3)
     }
 
@@ -776,6 +788,7 @@ impl BoardState {
             Constraint::Adjacent(color1, color2) => {
                 let c1 = self.color(*color1);
                 let c2 = self.color(*color2);
+                // TODO(trevorm): try c1.pos & c2.pos == 0 to avoid a branch.
                 c1.positions == 0
                     || c2.positions == 0
                     || (c1.positions & c2.adjacent == c1.positions
@@ -863,18 +876,34 @@ impl fmt::Display for BoardState {
 
 impl From<&ColorMix> for BoardState {
     fn from(mix: &ColorMix) -> BoardState {
-        let mut positions: Positions = [None; NUM_POSITIONS];
-        let mut sum = 0;
-        &positions[sum..(sum + mix.counts[0])].fill(Some(Color::Black));
-        sum += mix.counts[0];
-        &positions[sum..(sum + mix.counts[1])].fill(Some(Color::White));
-        sum += mix.counts[1];
-        &positions[sum..(sum + mix.counts[2])].fill(Some(Color::Blue));
-        sum += mix.counts[2];
-        &positions[sum..(sum + mix.counts[3])].fill(Some(Color::Green));
-        sum += mix.counts[3];
-        &positions[sum..(sum + mix.counts[4])].fill(Some(Color::Orange));
-        BoardState::with_positions(&positions).unwrap()
+        let mut board = BoardState::default();
+        let k = mix.count(Color::Black);
+        for i in 0..k {
+            board.add_position(Some(Color::Black), i)
+        }
+        let mut sum = k;
+        let w = mix.count(Color::White);
+        for i in sum..(sum + w) {
+            board.add_position(Some(Color::White), i)
+        }
+        sum += w;
+        let b = mix.count(Color::Blue);
+        for i in sum..(sum + b) {
+            board.add_position(Some(Color::Blue), i)
+        }
+        sum += b;
+        let g = mix.count(Color::Green);
+        for i in sum..(sum + g) {
+            board.add_position(Some(Color::Green), i)
+        }
+        sum += g;
+        let o = mix.count(Color::Orange);
+        for i in sum..(sum + o) {
+            board.add_position(Some(Color::Orange), i)
+        }
+        // ColorMix guarantees that we won't have more than 3 of each color, and this arrangement
+        // without gaps ensures that the board will be valid.
+        board
     }
 }
 

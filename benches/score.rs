@@ -20,12 +20,8 @@ fn parse_board(s: &str) -> Vec<Option<Color>> {
     out
 }
 
-fn parse_constraints(s: &str) -> Vec<Constraint> {
-    let mut out: Vec<Constraint> = Vec::new();
-    for c in s.split(",") {
-        out.push(Constraint::from_str(c).unwrap())
-    }
-    out
+fn parse_mix(s: &str) -> Vec<Color> {
+    parse_board(s).into_iter().filter_map(|c| c).collect()
 }
 
 struct ScoreBenchmarkData {
@@ -64,7 +60,14 @@ fn bm_create_board(c: &mut Criterion) {
     for d in SCORE_DATA.iter() {
         let positions = parse_board(d.board);
         group.bench_with_input(BenchmarkId::from_parameter(d.name), &d, |b, _d| {
-            b.iter(|| assert!(BoardState::with_positions(&positions).unwrap().is_valid()));
+            b.iter(|| {
+                assert!(
+                    BoardState::with_positions(&positions)
+                        .unwrap()
+                        .num_spheres()
+                        > 0
+                )
+            });
         });
     }
 }
@@ -73,12 +76,21 @@ fn bm_approximate_score(c: &mut Criterion) {
     let mut group = c.benchmark_group("approximate_score");
     for d in SCORE_DATA.iter() {
         let mix = ColorMix::from_str(d.board).unwrap();
-        let constraints = parse_constraints(d.constraints);
+        let constraints = ConstraintSet::with_constraints(
+            &Constraint::parse_list(d.constraints).expect(d.constraints),
+        );
         group.bench_with_input(BenchmarkId::from_parameter(d.name), &d, |b, _d| {
-            b.iter(|| {
-                // Computing ColorMix is a fairer comparison to bm_count_score
-                assert!(mix.approximate_matching_constraints(&constraints) > 0)
-            });
+            b.iter(|| assert!(mix.approximate_score(&constraints).score > 0));
+        });
+    }
+}
+
+fn bm_create_mix(c: &mut Criterion) {
+    let mut group = c.benchmark_group("create_mix");
+    for d in SCORE_DATA.iter() {
+        let colors = parse_mix(d.board);
+        group.bench_with_input(BenchmarkId::from_parameter(d.name), &d, |b, _d| {
+            b.iter(|| assert!(ColorMix::with_colors(&colors).unwrap().num_spheres() > 0));
         });
     }
 }
@@ -86,6 +98,6 @@ fn bm_approximate_score(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
-    targets = bm_score, bm_create_board, bm_approximate_score
+    targets = bm_score, bm_create_board, bm_approximate_score, bm_create_mix
 }
 criterion_main!(benches);
