@@ -1,4 +1,6 @@
 #[macro_use]
+extern crate itertools;
+#[macro_use]
 extern crate lazy_static;
 
 use itertools::Itertools;
@@ -440,13 +442,14 @@ impl ConstraintSet {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ColorMix {
-    // Pack everything into a single u32 containing 5 4-bit values.
-    // 4 bits is enough as the input will not have more than 11 input values.
-    // This is a form of vectorization that allows us to quickly compute
-    // "all values <= 3" and "all values > 0".
+    // Pack everything into a single u32 containing 5 4-bit values, one entry for each color.
+    // 4 bits is enough as we will not process more than 11 input entries. This is a form of
+    // vectorization that allows us to quickly compute "all values <= 3" and "all values > 0".
     rep: u32,
+    // Compute the sum of all color counts as it is used during scoring.
+    count: u32,
 }
 
 impl ColorMix {
@@ -454,7 +457,7 @@ impl ColorMix {
         if colors.len() > NUM_POSITIONS {
             return Err("ColorMix may not have more than 11 colors");
         }
-        let mut mix = ColorMix { rep: 0 };
+        let mut mix = ColorMix { rep: 0, count: 0 };
         // Most of the cost of this method is branching in the loop. 11 is the common case
         // so we unroll it here.
         if colors.len() == 11 {
@@ -474,6 +477,7 @@ impl ColorMix {
                 mix.add(*c);
             }
         }
+        // Interestingly this is ~15% slower written as mix.rep & 0xCCCCC == 0
         if mix.rep & 0x33333 == mix.rep {
             Ok(mix)
         } else {
@@ -482,7 +486,8 @@ impl ColorMix {
     }
 
     fn add(&mut self, c: Color) {
-        self.rep += 1 << (c as usize * 4)
+        self.rep += 1 << (c as usize * 4);
+        self.count += 1;
     }
 
     fn count(&self, c: Color) -> usize {
@@ -490,11 +495,7 @@ impl ColorMix {
     }
 
     pub fn num_spheres(&self) -> usize {
-        self.count(Color::Black)
-            + self.count(Color::White)
-            + self.count(Color::Blue)
-            + self.count(Color::Green)
-            + self.count(Color::Orange)
+        self.count as usize
     }
 
     pub fn has_all_colors(&self) -> bool {
@@ -520,12 +521,16 @@ impl ColorMix {
             Constraint::Count(count, color) => self.count(*color) == *count,
             Constraint::SumCount(color1, color2) => self.count(*color1) + self.count(*color2) == 4,
             Constraint::GreaterThan(color1, color2) => self.count(*color1) > self.count(*color2),
+            Constraint::Above(color) => {
+                // If a color must be above everything and there are 11 spheres it must be on top
+                // and there must be no other spheres of that color.
+                self.num_spheres() < 11 || self.count(*color) == 1
+            }
             // Approximations of these are too pessimistic given that we are trying
             // to compute an upper bound score. The best approximations only return true
             // when a targeted color is 0, where the flag cannot be set.
             Constraint::NotAdjacent(_, _) => true,
             Constraint::Below(_) => true,
-            Constraint::Above(_) => true,
         };
         if m {
             constraint.weight()
@@ -653,46 +658,21 @@ pub struct BoardState {
 impl BoardState {
     // Create a BoardState with the input positions. Returns None if the board is not valid.
     pub fn with_positions(positions: &[Option<Color>]) -> Option<BoardState> {
-        BoardState::with_positions_and_meta(&positions, None)
+        // Computing ColorMix checks that spheres per color <=3
+        if let Ok(mix) = ColorMix::with_colors(&positions.iter().filter_map(|c| *c).collect_vec()) {
+            BoardState::with_positions_and_mix(&positions, &mix)
+        } else {
+            None
+        }
     }
 
     // Create a BoardState with the input positions. Returns None if the board is not valid.
-    pub fn with_positions_and_meta(
-        mut positions: &[Option<Color>],
-        opt_mix: Option<ColorMix>,
+    pub fn with_positions_and_mix(
+        positions: &[Option<Color>],
+        mix: &ColorMix,
     ) -> Option<BoardState> {
-        if positions.len() > NUM_POSITIONS {
-            positions = &positions[0..NUM_POSITIONS];
-        }
         let mut board = BoardState::default();
-        // Unroll the loop in the common case.
-        if positions.len() == NUM_POSITIONS {
-            board.add_position(positions[0], 0);
-            board.add_position(positions[1], 1);
-            board.add_position(positions[2], 2);
-            board.add_position(positions[3], 3);
-            board.add_position(positions[4], 4);
-            board.add_position(positions[5], 5);
-            board.add_position(positions[6], 6);
-            board.add_position(positions[7], 7);
-            board.add_position(positions[8], 8);
-            board.add_position(positions[9], 9);
-            board.add_position(positions[10], 10);
-        } else {
-            for (i, p) in positions.iter().enumerate() {
-                board.add_position(*p, i);
-            }
-        }
-        // This checks that spheres per color <=3
-        let mix = match opt_mix {
-            Some(m) => m,
-            None => {
-                match ColorMix::with_colors(&positions.iter().filter_map(|c| *c).collect_vec()) {
-                    Ok(m) => m,
-                    Err(_) => return None,
-                }
-            }
-        };
+        board.init(positions.iter());
         if board.positions & board.below == board.below {
             board.has_all_colors = mix.has_all_colors();
             Some(board)
@@ -701,15 +681,20 @@ impl BoardState {
         }
     }
 
-    fn add_position(&mut self, color: Option<Color>, index: usize) {
-        match color {
-            Some(c) => {
-                self.color_positions |= 1 << ((c as usize * 12) + index);
-                self.color_adjacency |= (BOARD_GRAPH[index].adjacent as u64) << (c as usize * 12);
-                self.positions |= 1 << index;
-                self.below |= BOARD_GRAPH[index].below;
+    fn init<'a, I>(&mut self, positions: I)
+    where
+        I: Iterator<Item = &'a Option<Color>>,
+    {
+        for (i, p, g) in izip!((0..NUM_POSITIONS), positions, BOARD_GRAPH.iter()) {
+            match p {
+                Some(c) => {
+                    self.color_positions |= 1 << ((*c as usize * 12) + i);
+                    self.color_adjacency |= (g.adjacent as u64) << (*c as usize * 12);
+                    self.positions |= 1 << i;
+                    self.below |= g.below;
+                }
+                None => {}
             }
-            None => {}
         }
     }
 
@@ -732,6 +717,9 @@ impl BoardState {
         // If we have less than 11 spheres we may be able to run fewer permutations on the
         // beginning of the array ("lower" spheres), which will skip permutations that
         // produce invalid board states.
+        // TODO(trevorm): if we have 11 spheres and an above constraint we may place the
+        // above color on top and reduce this to 10. If we have two above constraints this
+        // optimization won't provide any value: the optimal board will have 10 or fewer.
         let p = match mix.num_spheres() {
             0..=3 => 7,   // need at least 4 spheres to stack anything, ~5K permutations.
             4..=10 => 10, // top sphere cannot be stacked, ~3.6M permutations.
@@ -864,31 +852,15 @@ impl fmt::Display for BoardState {
 
 impl From<&ColorMix> for BoardState {
     fn from(mix: &ColorMix) -> BoardState {
+        let mut pos: Positions = [None; NUM_POSITIONS];
+        let mut sum = 0;
+        for c in ALL_COLORS.iter() {
+            let count = mix.count(*c);
+            &pos[sum..(sum+count)].fill(Some(*c));
+            sum += count;
+        }
         let mut board = BoardState::default();
-        let k = mix.count(Color::Black);
-        for i in 0..k {
-            board.add_position(Some(Color::Black), i)
-        }
-        let mut sum = k;
-        let w = mix.count(Color::White);
-        for i in sum..(sum + w) {
-            board.add_position(Some(Color::White), i)
-        }
-        sum += w;
-        let b = mix.count(Color::Blue);
-        for i in sum..(sum + b) {
-            board.add_position(Some(Color::Blue), i)
-        }
-        sum += b;
-        let g = mix.count(Color::Green);
-        for i in sum..(sum + g) {
-            board.add_position(Some(Color::Green), i)
-        }
-        sum += g;
-        let o = mix.count(Color::Orange);
-        for i in sum..(sum + o) {
-            board.add_position(Some(Color::Orange), i)
-        }
+        board.init(pos.iter());
         board.has_all_colors = mix.has_all_colors();
         // ColorMix guarantees that we won't have more than 3 of each color, and this arrangement
         // without gaps ensures that the board will be valid.
@@ -912,7 +884,7 @@ where
             match self.iter.next() {
                 None => return None,
                 Some(p) => {
-                    let board = BoardState::with_positions_and_meta(&p, Some(self.mix));
+                    let board = BoardState::with_positions_and_mix(&p, &self.mix);
                     if board.is_some() {
                         return board;
                     }

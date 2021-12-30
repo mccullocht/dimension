@@ -63,7 +63,7 @@ fn bm_create_board(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(d.name), &d, |b, _d| {
             b.iter(|| {
                 assert!(
-                    BoardState::with_positions_and_meta(&positions, Some(mix))
+                    BoardState::with_positions_and_mix(&positions, &mix)
                         .unwrap()
                         .num_spheres()
                         > 0

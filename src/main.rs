@@ -25,10 +25,14 @@ fn get_input_colors() -> Vec<Color> {
 }
 
 fn get_all_color_mixes(k: usize) -> impl Iterator<Item = ColorMix> {
+    // Use unique() to filter combinations. In the worst case (15 choose 7|8) this generates 6435
+    // combinations with duplicates as some fields are repeated. ColorMix is only 64 bits long so
+    // this is unlikely to use more than 100KB memory.
     get_input_colors()
         .into_iter()
         .combinations(k)
         .as_color_mix()
+        .unique()
 }
 
 // Gets the upper bound score for each board size.
@@ -39,12 +43,7 @@ fn get_upper_bound_scores(constraints: &ConstraintSet) -> Vec<(usize, BoardScore
         let mut high_score = BoardScore::default();
 
         for m in get_all_color_mixes(k) {
-            // XXX just call m.approximate_score()
-            let score = constraints.compute_score(
-                k,
-                m.approximate_matching_constraints(constraints.scoring_constraints()),
-                m.has_all_colors(),
-            );
+            let score = m.approximate_score(&constraints);
             if score > high_score {
                 high_score = score
             }
