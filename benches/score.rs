@@ -59,10 +59,11 @@ fn bm_create_board(c: &mut Criterion) {
     let mut group = c.benchmark_group("create_board");
     for d in SCORE_DATA.iter() {
         let positions = parse_board(d.board);
+        let mix = ColorMix::with_colors(&parse_mix(d.board)).expect(d.board);
         group.bench_with_input(BenchmarkId::from_parameter(d.name), &d, |b, _d| {
             b.iter(|| {
                 assert!(
-                    BoardState::with_positions(&positions)
+                    BoardState::with_positions_and_meta(&positions, Some(mix))
                         .unwrap()
                         .num_spheres()
                         > 0
