@@ -42,8 +42,8 @@ const SCORE_DATA: [ScoreBenchmarkData; 2] = [
     },
 ];
 
-fn bm_score(c: &mut Criterion) {
-    let mut group = c.benchmark_group("score");
+fn bm_full_score(c: &mut Criterion) {
+    let mut group = c.benchmark_group("full_score");
     for d in SCORE_DATA.iter() {
         let board = BoardState::from_str(d.board).unwrap();
         let constraints = ConstraintSet::with_constraints(
@@ -98,6 +98,6 @@ fn bm_create_mix(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
-    targets = bm_score, bm_create_board, bm_approximate_score, bm_create_mix
+    targets = bm_full_score, bm_create_board, bm_approximate_score, bm_create_mix
 }
 criterion_main!(benches);
