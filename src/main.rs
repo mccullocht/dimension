@@ -39,6 +39,7 @@ fn get_all_color_mixes(k: usize) -> impl Iterator<Item = ColorMix> {
 fn get_upper_bound_scores(constraints: &ConstraintSet) -> Vec<(usize, BoardScore)> {
     let mut scores: Vec<(usize, BoardScore)> = Vec::with_capacity(NUM_POSITIONS);
     for k in 1..=NUM_POSITIONS {
+        println!("Upper bound for k={}", k);
         let max_score = constraints.max_score(k);
         let mut high_score = BoardScore::default();
 

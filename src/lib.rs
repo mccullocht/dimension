@@ -197,24 +197,6 @@ lazy_static! {
 }
 
 impl Constraint {
-    // Parses a comma separated list of constraints.
-    // TODO(trevorm): consider altering return type to String and noting the failed
-    // constraint in the parse.
-    pub fn parse_list(s: &str) -> Result<Vec<Constraint>, &'static str> {
-        if s.is_empty() {
-            return Ok(Vec::new());
-        }
-        let constraints: Vec<Constraint> = s
-            .split(",")
-            .map(|e| Constraint::from_str(e))
-            .try_collect()?;
-        if constraints.iter().unique().count() == constraints.len() {
-            Ok(constraints)
-        } else {
-            Err("all constraints in list must be unique")
-        }
-    }
-
     fn is_valid(&self) -> bool {
         VALID_CONSTRAINTS.contains(self)
     }
@@ -365,7 +347,6 @@ pub struct ConstraintSet {
     max_weight: usize,
 }
 
-// TODO(trevorm): convenience method? from_str()?
 impl ConstraintSet {
     // REQUIRES: no duplicates within constraints. This is true if constraints were generated
     // using Constraint::parse_list().
@@ -439,6 +420,27 @@ impl ConstraintSet {
     // Compute maximum possible BoardScore given these constraints.
     pub fn max_score(&self, num_spheres: usize) -> BoardScore {
         self.compute_score(num_spheres, self.max_weight, true)
+    }
+}
+
+impl FromStr for ConstraintSet {
+    type Err = &'static str;
+
+    // TODO(trevorm): consider altering return type to String and noting the failed
+    // constraint in the parse.
+    fn from_str(s: &str) -> Result<ConstraintSet, Self::Err> {
+        if s.is_empty() {
+            return Ok(ConstraintSet::with_constraints(&[]));
+        }
+        let constraints: Vec<Constraint> = s
+            .split(",")
+            .map(|e| Constraint::from_str(e))
+            .try_collect()?;
+        if constraints.iter().unique().count() == constraints.len() {
+            Ok(ConstraintSet::with_constraints(&constraints))
+        } else {
+            Err("all constraints in list must be unique")
+        }
     }
 }
 
@@ -856,7 +858,7 @@ impl From<&ColorMix> for BoardState {
         let mut sum = 0;
         for c in ALL_COLORS.iter() {
             let count = mix.count(*c);
-            &pos[sum..(sum+count)].fill(Some(*c));
+            &pos[sum..(sum + count)].fill(Some(*c));
             sum += count;
         }
         let mut board = BoardState::default();
@@ -1066,48 +1068,6 @@ mod test {
             test!(not_an_operator, "K-W", Err("unknown constraint operator"));
         }
 
-        mod parse_list {
-            #[allow(unused_imports)]
-            use super::*;
-
-            #[test]
-            fn parse() {
-                let constraints = Constraint::parse_list("K,KK,O|G,OW,GxK,*/W").unwrap();
-                assert_eq!(
-                    constraints,
-                    &[
-                        Constraint::Count(1, Color::Black),
-                        Constraint::Count(2, Color::Black),
-                        Constraint::Adjacent(Color::Green, Color::Orange),
-                        Constraint::SumCount(Color::White, Color::Orange),
-                        Constraint::NotAdjacent(Color::Black, Color::Green),
-                        Constraint::Below(Color::White),
-                    ]
-                );
-            }
-
-            #[test]
-            fn empty() {
-                assert_eq!(Constraint::parse_list(""), Ok(Vec::new()));
-            }
-
-            #[test]
-            fn duplicate() {
-                assert_eq!(
-                    Constraint::parse_list("O|G,G|O"),
-                    Err("all constraints in list must be unique")
-                );
-            }
-
-            #[test]
-            fn invalid_constraint() {
-                assert_eq!(
-                    Constraint::parse_list("O|G,GXO"),
-                    Err("unknown constraint operator")
-                );
-            }
-        }
-
         mod weight {
             #[allow(unused_imports)]
             use super::*;
@@ -1162,8 +1122,7 @@ mod test {
 
         #[allow(dead_code)]
         fn make(constraints: &str) -> ConstraintSet {
-            let c = Constraint::parse_list(constraints).expect(constraints);
-            ConstraintSet::with_constraints(&c)
+            ConstraintSet::from_str(constraints).expect(constraints)
         }
 
         mod with_constraints {
@@ -1307,8 +1266,7 @@ mod test {
                 #[test]
                 fn $name() {
                     let mix = ColorMix::from_str($s).expect($s);
-                    let constraints =
-                        ConstraintSet::with_constraints(&Constraint::parse_list($c).expect($c));
+                    let constraints = ConstraintSet::from_str($c).expect($c);
                     assert_eq!(mix.approximate_score(&constraints).score, $score);
                 }
             };
@@ -1316,8 +1274,7 @@ mod test {
                 #[test]
                 fn $name() {
                     let mix = ColorMix::from_str($s).expect($s);
-                    let constraints =
-                        ConstraintSet::with_constraints(&Constraint::parse_list($c).expect($c));
+                    let constraints = ConstraintSet::from_str($c).expect($c);
                     assert_eq!(
                         mix.approximate_score(&constraints),
                         BoardScore {
@@ -1506,8 +1463,7 @@ mod test {
                 #[test]
                 fn $name() {
                     let state = BoardState::from_str($s).expect($s);
-                    let constraints =
-                        ConstraintSet::with_constraints(&Constraint::parse_list($c).expect($c));
+                    let constraints = ConstraintSet::from_str($c).expect($c);
                     assert_eq!(state.score(&constraints).score, $score);
                 }
             };
@@ -1515,8 +1471,7 @@ mod test {
                 #[test]
                 fn $name() {
                     let state = BoardState::from_str($s).expect($s);
-                    let constraints =
-                        ConstraintSet::with_constraints(&Constraint::parse_list($c).expect($c));
+                    let constraints = ConstraintSet::from_str($c).expect($c);
                     assert_eq!(
                         state.score(&constraints),
                         BoardScore {

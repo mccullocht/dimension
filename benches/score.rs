@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use dimension::{BoardState, Color, ColorMix, Constraint, ConstraintSet};
+use dimension::{BoardState, Color, ColorMix, ConstraintSet};
 use pprof::criterion::{Output, PProfProfiler};
 use std::convert::TryFrom;
 use std::str::FromStr;
@@ -46,9 +46,7 @@ fn bm_full_score(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_score");
     for d in SCORE_DATA.iter() {
         let board = BoardState::from_str(d.board).unwrap();
-        let constraints = ConstraintSet::with_constraints(
-            &Constraint::parse_list(d.constraints).expect(d.constraints),
-        );
+        let constraints = ConstraintSet::from_str(d.constraints).expect(d.constraints);
         group.bench_with_input(BenchmarkId::from_parameter(d.name), &d, |b, _d| {
             b.iter(|| assert!(board.score(&constraints).score > 0));
         });
@@ -77,9 +75,7 @@ fn bm_approximate_score(c: &mut Criterion) {
     let mut group = c.benchmark_group("approximate_score");
     for d in SCORE_DATA.iter() {
         let mix = ColorMix::from_str(d.board).unwrap();
-        let constraints = ConstraintSet::with_constraints(
-            &Constraint::parse_list(d.constraints).expect(d.constraints),
-        );
+        let constraints = ConstraintSet::from_str(d.constraints).expect(d.constraints);
         group.bench_with_input(BenchmarkId::from_parameter(d.name), &d, |b, _d| {
             b.iter(|| assert!(mix.approximate_score(&constraints).score > 0));
         });
