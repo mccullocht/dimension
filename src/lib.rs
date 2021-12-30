@@ -676,11 +676,20 @@ pub struct BoardState {
     color_info: [ColorInfo; NUM_SPHERE_COLORS],
     positions: u16,
     below: u16,
+    has_all_colors: bool,
 }
 
 impl BoardState {
     // Create a BoardState with the input positions. Returns None if the board is not valid.
-    pub fn with_positions(mut positions: &[Option<Color>]) -> Option<BoardState> {
+    pub fn with_positions(positions: &[Option<Color>]) -> Option<BoardState> {
+        BoardState::with_positions_and_meta(&positions, None)
+    }
+
+    // Create a BoardState with the input positions. Returns None if the board is not valid.
+    pub fn with_positions_and_meta(
+        mut positions: &[Option<Color>],
+        has_all_colors: Option<bool>,
+    ) -> Option<BoardState> {
         if positions.len() > NUM_POSITIONS {
             positions = &positions[0..NUM_POSITIONS];
         }
@@ -704,6 +713,8 @@ impl BoardState {
             }
         }
         if board.is_valid() {
+            board.has_all_colors =
+                has_all_colors.unwrap_or_else(|| board.color_info.iter().all(|&c| c.positions > 0));
             Some(board)
         } else {
             None
@@ -733,7 +744,10 @@ impl BoardState {
             4..=10 => 10, // top sphere cannot be stacked, ~3.6M permutations.
             _ => 11,      // ~40M permutations.
         };
-        positions.into_iter().permutations(p).as_board_state()
+        positions
+            .into_iter()
+            .permutations(p)
+            .as_board_state(mix.has_all_colors())
     }
 
     pub fn num_spheres(&self) -> usize {
@@ -772,11 +786,7 @@ impl BoardState {
             .iter()
             .map(|c| self.matches_constraint(c))
             .sum();
-        constraints.compute_score(
-            self.num_spheres(),
-            matching,
-            self.color_info.iter().all(|&c| c.positions > 0),
-        )
+        constraints.compute_score(self.num_spheres(), matching, self.has_all_colors)
     }
 
     fn color(&self, c: Color) -> ColorInfo {
@@ -788,7 +798,6 @@ impl BoardState {
             Constraint::Adjacent(color1, color2) => {
                 let c1 = self.color(*color1);
                 let c2 = self.color(*color2);
-                // TODO(trevorm): try c1.pos & c2.pos == 0 to avoid a branch.
                 c1.positions == 0
                     || c2.positions == 0
                     || (c1.positions & c2.adjacent == c1.positions
@@ -827,6 +836,7 @@ impl Default for BoardState {
             color_info: [ColorInfo::default(); NUM_SPHERE_COLORS],
             positions: 0,
             below: 0,
+            has_all_colors: false,
         }
     }
 }
@@ -901,6 +911,7 @@ impl From<&ColorMix> for BoardState {
         for i in sum..(sum + o) {
             board.add_position(Some(Color::Orange), i)
         }
+        board.has_all_colors = mix.has_all_colors();
         // ColorMix guarantees that we won't have more than 3 of each color, and this arrangement
         // without gaps ensures that the board will be valid.
         board
@@ -909,6 +920,7 @@ impl From<&ColorMix> for BoardState {
 
 pub struct BoardStateAdaptor<I: Iterator> {
     iter: I,
+    has_all_colors: bool,
 }
 
 impl<I> Iterator for BoardStateAdaptor<I>
@@ -922,7 +934,7 @@ where
             match self.iter.next() {
                 None => return None,
                 Some(p) => {
-                    let board = BoardState::with_positions(&p);
+                    let board = BoardState::with_positions_and_meta(&p, Some(self.has_all_colors));
                     if board.is_some() {
                         return board;
                     }
@@ -933,11 +945,14 @@ where
 }
 
 pub trait BoardStateIterator: Iterator {
-    fn as_board_state(self) -> BoardStateAdaptor<Self>
+    fn as_board_state(self, has_all_colors: bool) -> BoardStateAdaptor<Self>
     where
         Self: Sized + Iterator<Item = Vec<Option<Color>>>,
     {
-        BoardStateAdaptor { iter: self }
+        BoardStateAdaptor {
+            iter: self,
+            has_all_colors: has_all_colors,
+        }
     }
 }
 
