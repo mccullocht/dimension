@@ -5,9 +5,10 @@ extern crate lazy_static;
 
 use itertools::Itertools;
 use std::cmp;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
+use std::iter;
 use std::str::FromStr;
 
 // Metadata about outbound edges for a node in the 11 node board graph.
@@ -126,7 +127,6 @@ impl From<Color> for char {
     }
 }
 
-// TODO(trevorm): move Constraint and ConstraintSet to another file.
 #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Constraint {
     // All spheres of these two colors must be adjacent to one another. Fmt: C1|C2
@@ -340,6 +340,7 @@ impl fmt::Display for Constraint {
     }
 }
 
+#[derive(Debug)]
 pub struct ConstraintSet {
     scoring: Vec<Constraint>,
     dropped: Vec<Constraint>,
@@ -349,7 +350,7 @@ pub struct ConstraintSet {
 
 impl ConstraintSet {
     // REQUIRES: no duplicates within constraints. This is true if constraints were generated
-    // using Constraint::parse_list().
+    // using ConstraintSet::from_str().
     pub fn with_constraints(constraints: &[Constraint]) -> ConstraintSet {
         let mut conflict_map: HashMap<Constraint, Vec<Constraint>> =
             HashMap::with_capacity(constraints.len());
@@ -504,6 +505,18 @@ impl ColorMix {
         (self.rep & 0x11111 | (self.rep >> 1) & 0x11111).count_ones() == 5
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = Color> {
+        self.color_iter(Color::Black)
+            .chain(self.color_iter(Color::White))
+            .chain(self.color_iter(Color::Blue))
+            .chain(self.color_iter(Color::Green))
+            .chain(self.color_iter(Color::Orange))
+    }
+
+    fn color_iter(&self, c: Color) -> impl Iterator<Item = Color> {
+        iter::repeat(c).take(self.count(c))
+    }
+
     // Returns an upper bound of the number of matching constraints based entirely on the
     // mix of colors used.
     pub fn approximate_matching_constraints(&self, constraints: &[Constraint]) -> usize {
@@ -555,12 +568,20 @@ impl FromStr for ColorMix {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut colors: Vec<Color> = Vec::with_capacity(s.len());
         for b in s.bytes() {
-            match Color::try_from(b) {
-                Ok(c) => colors.push(c),
-                Err(e) => return Err(e),
-            }
+            let c = Color::try_from(b)?;
+            colors.push(c);
         }
         ColorMix::with_colors(&colors)
+    }
+}
+
+impl fmt::Display for ColorMix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            self.iter().map(|c| char::from(c)).collect::<String>()
+        )
     }
 }
 
@@ -647,11 +668,52 @@ impl fmt::Display for BoardScore {
     }
 }
 
+// Represents an array of 5 11-bit values, one for each color.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ColorBoardArray {
+    rep: u64,
+}
+
+impl ColorBoardArray {
+    fn get(self, c: Color) -> u16 {
+        (self.rep >> (c as usize * 12)) as u16 & 0xfff
+    }
+
+    fn count(self, c: Color) -> usize {
+        ((self.rep >> (c as usize * 12)) & 0xfff).count_ones() as usize
+    }
+
+    fn set_bit(&mut self, c: Color, i: usize) {
+        debug_assert!(i <= 12);
+        self.rep |= 1 << (c as usize * 12) + i
+    }
+
+    fn or_equal(&mut self, c: Color, v: u16) {
+        debug_assert!(v <= 0xfff);
+        self.rep |= (v as u64) << (c as usize * 12);
+    }
+}
+
+impl Default for ColorBoardArray {
+    fn default() -> ColorBoardArray {
+        ColorBoardArray { rep: 0 }
+    }
+}
+
+// There is an alternative representation for cpositions as a u128
+// * 1 byte per position
+// * Set the hi bit for every set position.
+// * Set 1 << color as usize depending on the color set.
+// This would have a few advantages over the current representation:
+// * The representation would be easy to permute.
+// * Validation of the physical board (below) would be faster.
+// * Creating an object from the representation would probably be faster.
+// This would be total overkill given the current speed of the solver.
 type Positions = [Option<Color>; NUM_POSITIONS];
 #[derive(Debug, PartialEq)]
 pub struct BoardState {
-    color_positions: u64,
-    color_adjacency: u64,
+    cpositions: ColorBoardArray,
+    cadjacency: ColorBoardArray,
     positions: u16,
     below: u16,
     has_all_colors: bool,
@@ -690,26 +752,14 @@ impl BoardState {
         for (i, p, g) in izip!((0..NUM_POSITIONS), positions, BOARD_GRAPH.iter()) {
             match p {
                 Some(c) => {
-                    self.color_positions |= 1 << ((*c as usize * 12) + i);
-                    self.color_adjacency |= (g.adjacent as u64) << (*c as usize * 12);
+                    self.cpositions.set_bit(*c, i);
+                    self.cadjacency.or_equal(*c, g.adjacent);
                     self.positions |= 1 << i;
                     self.below |= g.below;
                 }
                 None => {}
             }
         }
-    }
-
-    fn color_positions(&self, c: Color) -> u16 {
-        (self.color_positions >> (c as usize * 12)) as u16 & 0xfff
-    }
-
-    fn color_count(&self, c: Color) -> usize {
-        self.color_positions(c).count_ones() as usize
-    }
-
-    fn color_adjacency(&self, c: Color) -> u16 {
-        (self.color_adjacency >> (c as usize * 12)) as u16 & 0xfff
     }
 
     // Produces all BoardState permutation from a single ColorMix.
@@ -719,15 +769,12 @@ impl BoardState {
         // If we have less than 11 spheres we may be able to run fewer permutations on the
         // beginning of the array ("lower" spheres), which will skip permutations that
         // produce invalid board states.
-        // TODO(trevorm): if we have 11 spheres and an above constraint we may place the
-        // above color on top and reduce this to 10. If we have two above constraints this
-        // optimization won't provide any value: the optimal board will have 10 or fewer.
         let p = match mix.num_spheres() {
-            0..=3 => 7,   // need at least 4 spheres to stack anything, ~5K permutations.
-            4..=10 => 10, // top sphere cannot be stacked, ~3.6M permutations.
-            _ => 11,      // ~40M permutations.
+            0..=3 => 7,   // need at least 4 spheres place any above L0
+            4..=10 => 10, // L2 can only be stacked if there are 11 spheres.
+            _ => 11,
         };
-        positions.into_iter().permutations(p).as_board_state(*mix)
+        positions.into_iter().unique_permutations(p).as_board_state(*mix)
     }
 
     pub fn num_spheres(&self) -> usize {
@@ -735,7 +782,7 @@ impl BoardState {
     }
 
     fn fill_positions_from_bitmap(&self, c: Color, p: &mut Positions) {
-        let mut bitmap = self.color_positions(c);
+        let mut bitmap = self.cpositions.get(c);
         while bitmap > 0 {
             let idx = bitmap.trailing_zeros();
             p[idx as usize] = Some(c);
@@ -763,30 +810,30 @@ impl BoardState {
     fn matches_constraint(&self, constraint: &Constraint) -> usize {
         let f: bool = match constraint {
             Constraint::Adjacent(color1, color2) => {
-                let c1_pos = self.color_positions(*color1);
-                let c2_pos = self.color_positions(*color2);
+                let c1_pos = self.cpositions.get(*color1);
+                let c2_pos = self.cpositions.get(*color2);
                 c1_pos == 0
                     || c2_pos == 0
-                    || (c1_pos & self.color_adjacency(*color2) == c1_pos
-                        && c2_pos & self.color_adjacency(*color1) == c2_pos)
+                    || (c1_pos & self.cadjacency.get(*color2) == c1_pos
+                        && c2_pos & self.cadjacency.get(*color1) == c2_pos)
             }
             Constraint::NotAdjacent(color1, color2) => {
-                let c1_pos = self.color_positions(*color1);
-                let c2_pos = self.color_positions(*color2);
-                c1_pos & !self.color_adjacency(*color2) == c1_pos
-                    && c2_pos & !self.color_adjacency(*color1) == c2_pos
+                let c1_pos = self.cpositions.get(*color1);
+                let c2_pos = self.cpositions.get(*color2);
+                c1_pos & !self.cadjacency.get(*color2) == c1_pos
+                    && c2_pos & !self.cadjacency.get(*color1) == c2_pos
             }
-            Constraint::Count(count, color) => self.color_count(*color) == *count,
+            Constraint::Count(count, color) => self.cpositions.count(*color) == *count,
             Constraint::SumCount(color1, color2) => {
-                self.color_count(*color1) + self.color_count(*color2) == 4
+                self.cpositions.count(*color1) + self.cpositions.count(*color2) == 4
             }
             Constraint::Below(color) => {
-                let color_positions = self.color_positions(*color);
-                color_positions & self.below == color_positions
+                let pos = self.cpositions.get(*color);
+                pos & self.below == pos
             }
-            Constraint::Above(color) => self.color_positions(*color) & self.below == 0,
+            Constraint::Above(color) => self.cpositions.get(*color) & self.below == 0,
             Constraint::GreaterThan(color1, color2) => {
-                self.color_count(*color1) > self.color_count(*color2)
+                self.cpositions.count(*color1) > self.cpositions.count(*color2)
             }
         };
         if f {
@@ -800,8 +847,8 @@ impl BoardState {
 impl Default for BoardState {
     fn default() -> BoardState {
         BoardState {
-            color_positions: 0,
-            color_adjacency: 0,
+            cpositions: ColorBoardArray::default(),
+            cadjacency: ColorBoardArray::default(),
             positions: 0,
             below: 0,
             has_all_colors: false,
@@ -855,11 +902,8 @@ impl fmt::Display for BoardState {
 impl From<&ColorMix> for BoardState {
     fn from(mix: &ColorMix) -> BoardState {
         let mut pos: Positions = [None; NUM_POSITIONS];
-        let mut sum = 0;
-        for c in ALL_COLORS.iter() {
-            let count = mix.count(*c);
-            &pos[sum..(sum + count)].fill(Some(*c));
-            sum += count;
+        for (i, o) in mix.iter().zip(pos.iter_mut()) {
+            *o = Some(i)
         }
         let mut board = BoardState::default();
         board.init(pos.iter());
@@ -909,6 +953,102 @@ pub trait BoardStateIterator: Iterator {
 }
 
 impl<I: Iterator<Item = Vec<Option<Color>>>> BoardStateIterator for I {}
+
+// TODO(trevorm): enum representation for initial + in flight.
+#[derive(Clone, Debug)]
+pub struct UniquePermutations<I: Iterator> {
+    state: Vec<VecDeque<I::Item>>,
+}
+
+// TODO(trevorm): make this all a little less panick-y.
+impl<I> UniquePermutations<I>
+where
+    I: Iterator,
+    I::Item: Copy + Ord,
+{
+    pub fn new(iter: I, k: usize) -> UniquePermutations<I> {
+        let mut values = iter.take(k).collect_vec();
+        values.sort();
+        debug_assert!(k <= values.len());
+        let mut p = UniquePermutations {
+            state: Vec::with_capacity(k),
+        };
+        p.state.resize(k, VecDeque::with_capacity(k));
+        p.fill_state(0, &values);
+        p
+    }
+
+    fn fill_state(&mut self, start: usize, mut values: &[I::Item]) {
+        debug_assert_eq!(values.len(), self.state.len() - start);
+        for i in start..self.state.len() {
+            self.state[i].clear();
+            for v in values.iter() {
+                if self.state[i].back() != Some(v) {
+                    self.state[i].push_back(*v)
+                }
+            }
+            values = &values[1..];
+        }
+    }
+
+    fn value(&self) -> Option<Vec<I::Item>> {
+        self.partial_value(0)
+    }
+
+    fn partial_value(&self, start: usize) -> Option<Vec<I::Item>> {
+        let mut v = Vec::with_capacity(self.state.len() - start);
+        for p in self.state.iter().skip(start) {
+            let item = p.iter().next()?;
+            v.push(*item);
+        }
+        Some(v)
+    }
+
+    fn advance(&mut self) {
+        let start = match self.state.iter().rposition(|s| s.len() > 1) {
+            Some(p) => p,
+            None => {
+                self.state[0].clear();
+                return;
+            }
+        };
+        debug_assert!(start < self.state.len() - 1);
+        debug_assert!(self.state[start].len() >= 2);
+        let mut partial = self.partial_value(start).unwrap();
+        self.state[start].pop_front();
+        let new = self.state[start].iter().next().unwrap();
+        let swapp = partial.iter().position(|d| d == new).unwrap();
+        debug_assert!(swapp != 0);
+        partial.swap(0, swapp);
+        &partial[1..].sort();
+        self.fill_state(start + 1, &partial[1..]);
+    }
+}
+
+impl<I> Iterator for UniquePermutations<I>
+where
+    I: Iterator,
+    I::Item: Copy + fmt::Debug + Ord,
+{
+    type Item = Vec<I::Item>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let v = self.value()?;
+        self.advance();
+        Some(v)
+    }
+}
+
+pub trait Iterators : Iterator {
+    fn unique_permutations(self, k: usize) -> UniquePermutations<Self>
+    where
+        Self: Sized, Self::Item: Copy + Ord
+    {
+        UniquePermutations::<Self>::new(self, k)
+    }
+}
+
+impl<I: Sized> Iterators for I where I: Iterator {}
 
 mod test {
     #[allow(unused_imports)]
@@ -1327,6 +1467,62 @@ mod test {
         test!(greater_than6, "GWOOGG", "G>O", 6);
         test!(flag_trivial, "KWBOG", "", 5, true);
         test!(flag_constraint, "KWBOG", "K", 5, true);
+    }
+
+    mod unique_permutations {
+        #[allow(unused_imports)]
+        use super::*;
+
+        #[test]
+        fn permute0001() {
+            assert_eq!(
+                UniquePermutations::new([0, 0, 0, 1].iter().copied(), 4).collect_vec(),
+                &[[0, 0, 0, 1], [0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0]]
+            );
+        }
+        #[test]
+        fn permute0011() {
+            assert_eq!(
+                UniquePermutations::new([0, 0, 1, 1].iter().copied(), 4).collect_vec(),
+                &[
+                    [0, 0, 1, 1],
+                    [0, 1, 0, 1],
+                    [0, 1, 1, 0],
+                    [1, 0, 0, 1],
+                    [1, 0, 1, 0],
+                    [1, 1, 0, 0]
+                ]
+            );
+        }
+
+        #[test]
+        fn permute01112() {
+            assert_eq!(
+                UniquePermutations::new([0, 1, 1, 1, 2].iter().copied(), 5).collect_vec(),
+                &[
+                    [0, 1, 1, 1, 2],
+                    [0, 1, 1, 2, 1],
+                    [0, 1, 2, 1, 1],
+                    [0, 2, 1, 1, 1],
+                    [1, 0, 1, 1, 2],
+                    [1, 0, 1, 2, 1],
+                    [1, 0, 2, 1, 1],
+                    [1, 1, 0, 1, 2],
+                    [1, 1, 0, 2, 1],
+                    [1, 1, 1, 0, 2],
+                    [1, 1, 1, 2, 0],
+                    [1, 1, 2, 0, 1],
+                    [1, 1, 2, 1, 0],
+                    [1, 2, 0, 1, 1],
+                    [1, 2, 1, 0, 1],
+                    [1, 2, 1, 1, 0],
+                    [2, 0, 1, 1, 1],
+                    [2, 1, 0, 1, 1],
+                    [2, 1, 1, 0, 1],
+                    [2, 1, 1, 1, 0],
+                ]
+            );
+        }
     }
 
     mod board_state_from_str {

@@ -2,8 +2,6 @@ use dimension::*;
 use itertools::Itertools;
 use structopt::StructOpt;
 
-// TODO(trevorm): consider color count constraints when generating this.
-// This may not be necessary if blindly scoring all combinations is fast enough.
 fn get_input_colors() -> Vec<Color> {
     vec![
         Color::Black,
@@ -24,6 +22,7 @@ fn get_input_colors() -> Vec<Color> {
     ]
 }
 
+// TODO(trevorm): make this a class method on ColorMix.
 fn get_all_color_mixes(k: usize) -> impl Iterator<Item = ColorMix> {
     // Use unique() to filter combinations. In the worst case (15 choose 7|8) this generates 6435
     // combinations with duplicates as some fields are repeated. ColorMix is only 64 bits long so
@@ -39,7 +38,6 @@ fn get_all_color_mixes(k: usize) -> impl Iterator<Item = ColorMix> {
 fn get_upper_bound_scores(constraints: &ConstraintSet) -> Vec<(usize, BoardScore)> {
     let mut scores: Vec<(usize, BoardScore)> = Vec::with_capacity(NUM_POSITIONS);
     for k in 1..=NUM_POSITIONS {
-        println!("Upper bound for k={}", k);
         let max_score = constraints.max_score(k);
         let mut high_score = BoardScore::default();
 
@@ -60,15 +58,8 @@ fn get_upper_bound_scores(constraints: &ConstraintSet) -> Vec<(usize, BoardScore
 }
 
 // TODO(trevorm): tests for this method.
-// TODO(trevorm): handle conflicting constraints better. This does pretty well with
-// count based conflicts due to upper bound handling but does awful on position based
-// constraints. Solutions in order of effectiveness:
-// * Remove conflicting constraints before solving an apply later.
-// * Remove duplicate permutations during generation to reduce number of scoring calls.
-// * Accelerate permutation and scoring through vectorization.
-fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
-    let constraint_set = ConstraintSet::with_constraints(constraints);
-    for c in constraint_set.dropped_constraints() {
+fn solve(constraints: &ConstraintSet) -> (BoardState, BoardScore) {
+    for c in constraints.dropped_constraints() {
         println!(
             "Dropping conflicting constraint '{}'; taking 2 point/no flag penalty.",
             c
@@ -77,7 +68,7 @@ fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
     let mut best_board = BoardState::default();
     let mut best_score = BoardScore::default();
 
-    for (k, max_score) in get_upper_bound_scores(&constraint_set) {
+    for (k, max_score) in get_upper_bound_scores(&constraints) {
         if max_score < best_score {
             break;
         }
@@ -85,10 +76,10 @@ fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
         // Iterate over all ColorMixes whose approximate_score() matches max_score, then iterate
         // over those permutations to compute final scores.
         for mix in
-            get_all_color_mixes(k).filter(|m| m.approximate_score(&constraint_set) == max_score)
+            get_all_color_mixes(k).filter(|m| m.approximate_score(&constraints) == max_score)
         {
             for board in BoardState::permutations_from_color_mix(&mix) {
-                let score = board.score(&constraint_set);
+                let score = board.score(&constraints);
                 if score > best_score {
                     best_board = board;
                     best_score = score;
@@ -110,18 +101,15 @@ fn solve(constraints: &[Constraint]) -> (BoardState, BoardScore) {
 struct Opt {
     #[structopt(short, long = "--board")]
     board: Option<BoardState>,
-    #[structopt(short, long = "--constraints", use_delimiter(true), required(true))]
-    constraints: Vec<Constraint>,
+    #[structopt(short, long = "--constraints", required(true))]
+    constraints: ConstraintSet,
 }
 
 fn main() {
     let opt = Opt::from_args();
     match opt.board {
         Some(board) => {
-            println!(
-                "{}",
-                board.score(&ConstraintSet::with_constraints(&opt.constraints))
-            )
+            println!("{}", board.score(&opt.constraints))
         }
         None => {
             let (board, score) = solve(&opt.constraints);
