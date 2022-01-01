@@ -422,6 +422,63 @@ impl ConstraintSet {
     pub fn max_score(&self, num_spheres: usize) -> BoardScore {
         self.compute_score(num_spheres, self.max_weight, true)
     }
+
+    // Gets the upper bound score for each board size.
+    fn get_upper_bound_scores(&self) -> Vec<(usize, BoardScore)> {
+        let mut scores: Vec<(usize, BoardScore)> = Vec::with_capacity(NUM_POSITIONS);
+        for k in 1..=NUM_POSITIONS {
+            let max_score = self.max_score(k);
+            let mut high_score = BoardScore::default();
+
+            for m in ColorMix::all_combinations(k) {
+                let score = m.approximate_score(self);
+                if score > high_score {
+                    high_score = score
+                }
+                if high_score == max_score {
+                    break;
+                }
+            }
+            scores.push((k, high_score))
+        }
+        // Return in descending order by score.
+        scores.sort_by(|(_, a), (_, b)| a.cmp(&b).reverse());
+        scores
+    }
+
+    // Returns a BoardState that achieves the highest possible score for these constraints.
+    pub fn solve(&self) -> (BoardState, BoardScore) {
+        let mut best_board = BoardState::default();
+        let mut best_score = BoardScore::default();
+
+        for (k, max_score) in self.get_upper_bound_scores() {
+            if max_score < best_score {
+                break;
+            }
+
+            // Iterate over all ColorMixes whose approximate_score() matches max_score, then iterate
+            // over those permutations to compute final scores.
+            for mix in
+                ColorMix::all_combinations(k).filter(|m| m.approximate_score(self) == max_score)
+            {
+                for board in BoardState::permutations_from_color_mix(&mix) {
+                    let score = board.score(self);
+                    if score > best_score {
+                        best_board = board;
+                        best_score = score;
+                        if best_score == max_score {
+                            break;
+                        }
+                    }
+                }
+
+                if best_score == max_score {
+                    break;
+                }
+            }
+        }
+        (best_board, best_score)
+    }
 }
 
 impl FromStr for ConstraintSet {
@@ -488,6 +545,16 @@ impl ColorMix {
         }
     }
 
+    pub fn all_combinations(num_spheres: usize) -> impl Iterator<Item = ColorMix> {
+        ALL_COLORS
+            .iter()
+            .copied()
+            .flat_map(|c| iter::repeat(c).take(3))
+            .combinations(num_spheres)
+            .as_color_mix()
+            .unique()
+    }
+
     fn add(&mut self, c: Color) {
         self.rep += 1 << (c as usize * 4);
         self.count += 1;
@@ -505,16 +572,11 @@ impl ColorMix {
         (self.rep & 0x11111 | (self.rep >> 1) & 0x11111).count_ones() == 5
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Color> {
-        self.color_iter(Color::Black)
-            .chain(self.color_iter(Color::White))
-            .chain(self.color_iter(Color::Blue))
-            .chain(self.color_iter(Color::Green))
-            .chain(self.color_iter(Color::Orange))
-    }
-
-    fn color_iter(&self, c: Color) -> impl Iterator<Item = Color> {
-        iter::repeat(c).take(self.count(c))
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = Color> + 'a {
+        ALL_COLORS
+            .iter()
+            .copied()
+            .flat_map(move |c| iter::repeat(c).take(self.count(c)))
     }
 
     // Returns an upper bound of the number of matching constraints based entirely on the
@@ -705,12 +767,12 @@ impl Default for ColorBoardArray {
 // * Set the hi bit for every set position.
 // * Set 1 << color as usize depending on the color set.
 // This would have a few advantages over the current representation:
-// * The representation would be easy to permute.
-// * Validation of the physical board (below) would be faster.
+// * The representation itself would be easy to permute.
+// * Validation of the physical board (below op) would be faster.
 // * Creating an object from the representation would probably be faster.
-// This would be total overkill given the current speed of the solver.
+// There isn't much point to doing this given the speed of the solver.
 type Positions = [Option<Color>; NUM_POSITIONS];
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct BoardState {
     cpositions: ColorBoardArray,
     cadjacency: ColorBoardArray,
@@ -721,27 +783,24 @@ pub struct BoardState {
 
 impl BoardState {
     // Create a BoardState with the input positions. Returns None if the board is not valid.
-    pub fn with_positions(positions: &[Option<Color>]) -> Option<BoardState> {
+    pub fn with_positions(positions: &[Option<Color>]) -> Result<BoardState, &'static str> {
         // Computing ColorMix checks that spheres per color <=3
-        if let Ok(mix) = ColorMix::with_colors(&positions.iter().filter_map(|c| *c).collect_vec()) {
-            BoardState::with_positions_and_mix(&positions, &mix)
-        } else {
-            None
-        }
+        let mix = ColorMix::with_colors(&positions.iter().filter_map(|c| *c).collect_vec())?;
+        BoardState::with_positions_and_mix(&positions, &mix)
     }
 
     // Create a BoardState with the input positions. Returns None if the board is not valid.
     pub fn with_positions_and_mix(
         positions: &[Option<Color>],
         mix: &ColorMix,
-    ) -> Option<BoardState> {
+    ) -> Result<BoardState, &'static str> {
         let mut board = BoardState::default();
         board.init(positions.iter());
         if board.positions & board.below == board.below {
             board.has_all_colors = mix.has_all_colors();
-            Some(board)
+            Ok(board)
         } else {
-            None
+            Err("Board has empty positions below occupied positions")
         }
     }
 
@@ -774,7 +833,10 @@ impl BoardState {
             4..=10 => 10, // L2 can only be stacked if there are 11 spheres.
             _ => 11,
         };
-        positions.into_iter().unique_permutations(p).as_board_state(*mix)
+        positions
+            .into_iter()
+            .unique_permutations(p)
+            .as_board_state(*mix)
     }
 
     pub fn num_spheres(&self) -> usize {
@@ -875,7 +937,7 @@ impl FromStr for BoardState {
             }
         }
 
-        BoardState::with_positions(&values).ok_or("Parsed board state is not valid")
+        BoardState::with_positions(&values)
     }
 }
 
@@ -931,8 +993,8 @@ where
                 None => return None,
                 Some(p) => {
                     let board = BoardState::with_positions_and_mix(&p, &self.mix);
-                    if board.is_some() {
-                        return board;
+                    if board.is_ok() {
+                        return board.ok();
                     }
                 }
             }
@@ -998,7 +1060,7 @@ where
     fn partial_value(&self, start: usize) -> Option<Vec<I::Item>> {
         let mut v = Vec::with_capacity(self.state.len() - start);
         for p in self.state.iter().skip(start) {
-            let item = p.iter().next()?;
+            let item = p.front()?;
             v.push(*item);
         }
         Some(v)
@@ -1008,6 +1070,8 @@ where
         let start = match self.state.iter().rposition(|s| s.len() > 1) {
             Some(p) => p,
             None => {
+                // This is the termination condition -- if all the state elements have a single
+                // entry then no more permutations can be generated.
                 self.state[0].clear();
                 return;
             }
@@ -1016,7 +1080,7 @@ where
         debug_assert!(self.state[start].len() >= 2);
         let mut partial = self.partial_value(start).unwrap();
         self.state[start].pop_front();
-        let new = self.state[start].iter().next().unwrap();
+        let new = self.state[start].front().unwrap();
         let swapp = partial.iter().position(|d| d == new).unwrap();
         debug_assert!(swapp != 0);
         partial.swap(0, swapp);
@@ -1039,10 +1103,11 @@ where
     }
 }
 
-pub trait Iterators : Iterator {
+pub trait Iterators: Iterator {
     fn unique_permutations(self, k: usize) -> UniquePermutations<Self>
     where
-        Self: Sized, Self::Item: Copy + Ord
+        Self: Sized,
+        Self::Item: Copy + Ord,
     {
         UniquePermutations::<Self>::new(self, k)
     }
@@ -1363,6 +1428,67 @@ mod test {
                 );
             }
         }
+
+        // These would be pretty slow for normal tests but are much worse in a debug build.
+        mod solve {
+            #[allow(unused_imports)]
+            use super::*;
+
+            macro_rules! test {
+                ($name: ident, $constraints: literal, $board: literal, $score: expr) => {
+                    #[test]
+                    fn $name() {
+                        let (actual_board, actual_score) = ConstraintSet::from_str($constraints)
+                            .expect($constraints)
+                            .solve();
+                        assert_eq!($score, actual_score);
+                        assert_eq!(
+                            BoardState::from_str($board).expect($board),
+                            actual_board,
+                            "{}",
+                            actual_board
+                        );
+                    }
+                };
+            }
+
+            test!(
+                typical,
+                "OO,KW,G/*,G|B,WxW,K|O",
+                "KKKWOBBOBG.",
+                BoardScore::new(10, true)
+            );
+            test!(
+                adjacent_conflict,
+                "G|G,GxG",
+                "KKKWWWBBBGG",
+                BoardScore::new(9, false)
+            );
+            test!(
+                level_conflict,
+                "G/*,*/G",
+                "KKKWWWBBGGB",
+                BoardScore::new(9, false)
+            );
+            test!(
+                count_greater_than_soft_conflict,
+                "K>B,B,BB",
+                "KKKWWWBBBGG",
+                BoardScore::new(9, false)
+            );
+            test!(
+                above_soft_conflict,
+                "W/*,B/*",
+                "KKKGGGOWWB.",
+                BoardScore::new(10, true)
+            );
+            test!(
+                complex_adjacency,
+                "G|G,B|K,O|W,WxK,BxB,GxK",
+                "OKBGGWBKBOK",
+                BoardScore::new(11, true)
+            );
+        }
     }
 
     mod board_score {
@@ -1525,116 +1651,40 @@ mod test {
         }
     }
 
-    mod board_state_from_str {
+    mod board_state {
         #[allow(unused_imports)]
         use super::*;
-        macro_rules! test {
-            ($name: ident, $s: expr, $($c:expr),*) => {
-                #[test]
-                fn $name() {
-                    let mut positions: [Option<Color>; BOARD_GRAPH.len()] = [None; BOARD_GRAPH.len()];
-                    let mut p = 0;
-                    $(
-                        #[allow(unused_assignments)]
-                        {
-                            assert!(p < BOARD_GRAPH.len());
-                            positions[p] = $c;
-                            p = p + 1;
-                        }
-                    )*
-                    assert_eq!(BoardState::from_str($s).unwrap().positions(), positions, "input={} actual={:?}", $s, positions);
+
+        mod from_str {
+            #[allow(unused_imports)]
+            use super::*;
+            macro_rules! test {
+                ($name: ident, $s: expr, $($c:expr),*) => {
+                    #[test]
+                    fn $name() {
+                        let mut positions: [Option<Color>; BOARD_GRAPH.len()] = [None; BOARD_GRAPH.len()];
+                        let mut p = 0;
+                        $(
+                            #[allow(unused_assignments)]
+                            {
+                                assert!(p < BOARD_GRAPH.len());
+                                positions[p] = $c;
+                                p = p + 1;
+                            }
+                        )*
+                        assert_eq!(BoardState::from_str($s).unwrap().positions(), positions, "input={} actual={:?}", $s, positions);
+                    }
                 }
             }
-        }
-        test!(black, "K", Some(Color::Black));
-        test!(white, "W", Some(Color::White));
-        test!(blue, "B", Some(Color::Blue));
-        test!(green, "G", Some(Color::Green));
-        test!(orange, "O", Some(Color::Orange));
-        test!(empty, ".O", None, Some(Color::Orange));
-        test!(
-            eleven,
-            "KWWWBBBGGGO",
-            Some(Color::Black),
-            Some(Color::White),
-            Some(Color::White),
-            Some(Color::White),
-            Some(Color::Blue),
-            Some(Color::Blue),
-            Some(Color::Blue),
-            Some(Color::Green),
-            Some(Color::Green),
-            Some(Color::Green),
-            Some(Color::Orange)
-        );
-
-        #[test]
-        fn invalid_color() {
-            assert_eq!(
-                BoardState::from_str("X"),
-                Err("invalid place must be in [KWBOG.]")
-            )
-        }
-
-        #[test]
-        fn too_long() {
-            assert_eq!(
-                BoardState::from_str("KKKWWWOOOGGG"),
-                Err("cannot fill more than 11 places")
-            )
-        }
-
-        #[test]
-        fn missing_l0() {
-            assert_eq!(
-                BoardState::from_str(".KKKWWWOOOG"),
-                Err("Parsed board state is not valid")
-            )
-        }
-
-        #[test]
-        fn missing_l1() {
-            assert_eq!(
-                BoardState::from_str("OKKKWWW...G"),
-                Err("Parsed board state is not valid")
-            )
-        }
-
-        #[test]
-        fn color_limit3() {
-            assert_eq!(
-                BoardState::from_str("OKKKWWWBBBK"),
-                Err("Parsed board state is not valid")
-            )
-        }
-    }
-
-    mod board_state_format {
-        #[allow(unused_imports)]
-        use super::*;
-        macro_rules! test {
-            ($name: ident, $c: expr, $expected:expr) => {
-                #[test]
-                fn $name() {
-                    let actual = format!("{}", BoardState::with_positions(&$c).unwrap());
-                    assert_eq!(
-                        $expected, actual,
-                        "expected={} actual={}",
-                        $expected, actual
-                    );
-                }
-            };
-        }
-
-        test!(black, [Some(Color::Black)], "K..........");
-        test!(white, [Some(Color::White)], "W..........");
-        test!(blue, [Some(Color::Blue)], "B..........");
-        test!(green, [Some(Color::Green)], "G..........");
-        test!(orange, [Some(Color::Orange)], "O..........");
-        test!(empty, [None, Some(Color::Orange)], ".O.........");
-        test!(
-            eleven,
-            [
+            test!(black, "K", Some(Color::Black));
+            test!(white, "W", Some(Color::White));
+            test!(blue, "B", Some(Color::Blue));
+            test!(green, "G", Some(Color::Green));
+            test!(orange, "O", Some(Color::Orange));
+            test!(empty, ".O", None, Some(Color::Orange));
+            test!(
+                eleven,
+                "KWWWBBBGGGO",
                 Some(Color::Black),
                 Some(Color::White),
                 Some(Color::White),
@@ -1646,76 +1696,157 @@ mod test {
                 Some(Color::Green),
                 Some(Color::Green),
                 Some(Color::Orange)
-            ],
-            "KWWWBBBGGGO"
-        );
-    }
+            );
 
-    mod board_state_score {
-        #[allow(unused_imports)]
-        use super::*;
-        macro_rules! test {
-            ($name:ident, $s:expr, $c:expr, $score:expr) => {
-                #[test]
-                fn $name() {
-                    let state = BoardState::from_str($s).expect($s);
-                    let constraints = ConstraintSet::from_str($c).expect($c);
-                    assert_eq!(state.score(&constraints).score, $score);
-                }
-            };
-            ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
-                #[test]
-                fn $name() {
-                    let state = BoardState::from_str($s).expect($s);
-                    let constraints = ConstraintSet::from_str($c).expect($c);
-                    assert_eq!(
-                        state.score(&constraints),
-                        BoardScore {
-                            score: $score,
-                            flag: $flag
-                        }
-                    );
-                }
-            };
+            #[test]
+            fn invalid_color() {
+                assert_eq!(
+                    BoardState::from_str("X"),
+                    Err("invalid place must be in [KWBOG.]")
+                )
+            }
+
+            #[test]
+            fn too_long() {
+                assert_eq!(
+                    BoardState::from_str("KKKWWWOOOGGG"),
+                    Err("cannot fill more than 11 places")
+                )
+            }
+
+            #[test]
+            fn missing_l0() {
+                assert_eq!(
+                    BoardState::from_str(".KKKWWWOOOG"),
+                    Err("Board has empty positions below occupied positions")
+                )
+            }
+
+            #[test]
+            fn missing_l1() {
+                assert_eq!(
+                    BoardState::from_str("OKKKWWW...G"),
+                    Err("Board has empty positions below occupied positions")
+                )
+            }
+
+            #[test]
+            fn color_limit3() {
+                assert_eq!(
+                    BoardState::from_str("OKKKWWWBBBK"),
+                    Err("ColorMix may not have more than 3 of any color")
+                )
+            }
         }
 
-        test!(adjacent1, ".KWKWKW", "K|W", 6);
-        test!(adjacent2, ".KWKWKW", "W|K", 6);
-        test!(adjacent3, "GKWKWKGOOOW", "K|W", 9);
-        test!(adjacent4, "GKWKWKGOOOW", "W|K", 9);
-        test!(adjacent5, "GGGKKKOOOBB", "K|W", 11);
-        test!(not_adjacent1, ".KWKWKW", "KxW", 4);
-        test!(not_adjacent2, ".KWKWKW", "WxK", 4);
-        test!(not_adjacent3, "GKK.WW", "KxW", 5);
-        test!(not_adjacent4, "GKK.WW", "WxK", 5);
-        test!(count1, "B", "BB", 0);
-        test!(count2, "BK", "BB", 0);
-        test!(count3, "BKK", "BB", 1);
-        test!(count4, "BKKB", "BB", 4);
-        test!(count5, "BKKBB", "BB", 3);
-        test!(sum_count1, "B", "BO", 0);
-        test!(sum_count2, "BOBO", "BO", 4);
-        test!(sum_count3, "BOBOW", "BO", 5);
-        test!(sum_count4, "BOWB", "BO", 2);
-        test!(sum_count5, "BOWO", "BO", 2);
-        test!(below1, "WWW", "*/W", 1);
-        test!(below2, "WWW....B", "*/W", 4);
-        test!(below3, "KWWW...B", "*/W", 3);
-        test!(below4, "WBBBKKKOOOW", "*/W", 9);
-        test!(below5, "GBBBKKKWWW", "*/W", 8);
-        test!(above1, "WWW", "W/*", 3);
-        test!(above2, "WWW....B", "W/*", 2);
-        test!(above3, "KWWW...B", "W/*", 3);
-        test!(above4, "WBBBKKKOOOW", "W/*", 9);
-        test!(above5, "GBBBKKKOOOW", "W/*", 11);
-        test!(above6, "GBBBKKKWWW", "W/*", 10);
-        test!(greater_than1, "G", "G>O", 1);
-        test!(greater_than2, "GW", "G>O", 2);
-        test!(greater_than3, "GWO", "G>O", 1);
-        test!(greater_than4, "GWOO", "G>O", 2);
-        test!(greater_than5, "GWOOG", "G>O", 3);
-        test!(greater_than6, "GWOOGG", "G>O", 6);
-        test!(flag_trivial, "KWBOG", "", 5, true);
-        test!(flag_constraint, "KWBOG", "K", 5, true);
+        mod format {
+            #[allow(unused_imports)]
+            use super::*;
+            macro_rules! test {
+                ($name: ident, $c: expr, $expected:expr) => {
+                    #[test]
+                    fn $name() {
+                        let actual = format!("{}", BoardState::with_positions(&$c).unwrap());
+                        assert_eq!(
+                            $expected, actual,
+                            "expected={} actual={}",
+                            $expected, actual
+                        );
+                    }
+                };
+            }
+
+            test!(black, [Some(Color::Black)], "K..........");
+            test!(white, [Some(Color::White)], "W..........");
+            test!(blue, [Some(Color::Blue)], "B..........");
+            test!(green, [Some(Color::Green)], "G..........");
+            test!(orange, [Some(Color::Orange)], "O..........");
+            test!(empty, [None, Some(Color::Orange)], ".O.........");
+            test!(
+                eleven,
+                [
+                    Some(Color::Black),
+                    Some(Color::White),
+                    Some(Color::White),
+                    Some(Color::White),
+                    Some(Color::Blue),
+                    Some(Color::Blue),
+                    Some(Color::Blue),
+                    Some(Color::Green),
+                    Some(Color::Green),
+                    Some(Color::Green),
+                    Some(Color::Orange)
+                ],
+                "KWWWBBBGGGO"
+            );
+        }
+
+        mod score {
+            #[allow(unused_imports)]
+            use super::*;
+            macro_rules! test {
+                ($name:ident, $s:expr, $c:expr, $score:expr) => {
+                    #[test]
+                    fn $name() {
+                        let state = BoardState::from_str($s).expect($s);
+                        let constraints = ConstraintSet::from_str($c).expect($c);
+                        assert_eq!(state.score(&constraints).score, $score);
+                    }
+                };
+                ($name:ident, $s:expr, $c:expr, $score:expr, $flag:expr) => {
+                    #[test]
+                    fn $name() {
+                        let state = BoardState::from_str($s).expect($s);
+                        let constraints = ConstraintSet::from_str($c).expect($c);
+                        assert_eq!(
+                            state.score(&constraints),
+                            BoardScore {
+                                score: $score,
+                                flag: $flag
+                            }
+                        );
+                    }
+                };
+            }
+
+            test!(adjacent1, ".KWKWKW", "K|W", 6);
+            test!(adjacent2, ".KWKWKW", "W|K", 6);
+            test!(adjacent3, "GKWKWKGOOOW", "K|W", 9);
+            test!(adjacent4, "GKWKWKGOOOW", "W|K", 9);
+            test!(adjacent5, "GGGKKKOOOBB", "K|W", 11);
+            test!(not_adjacent1, ".KWKWKW", "KxW", 4);
+            test!(not_adjacent2, ".KWKWKW", "WxK", 4);
+            test!(not_adjacent3, "GKK.WW", "KxW", 5);
+            test!(not_adjacent4, "GKK.WW", "WxK", 5);
+            test!(count1, "B", "BB", 0);
+            test!(count2, "BK", "BB", 0);
+            test!(count3, "BKK", "BB", 1);
+            test!(count4, "BKKB", "BB", 4);
+            test!(count5, "BKKBB", "BB", 3);
+            test!(sum_count1, "B", "BO", 0);
+            test!(sum_count2, "BOBO", "BO", 4);
+            test!(sum_count3, "BOBOW", "BO", 5);
+            test!(sum_count4, "BOWB", "BO", 2);
+            test!(sum_count5, "BOWO", "BO", 2);
+            test!(below1, "WWW", "*/W", 1);
+            test!(below2, "WWW....B", "*/W", 4);
+            test!(below3, "KWWW...B", "*/W", 3);
+            test!(below4, "WBBBKKKOOOW", "*/W", 9);
+            test!(below5, "GBBBKKKWWW", "*/W", 8);
+            test!(above1, "WWW", "W/*", 3);
+            test!(above2, "WWW....B", "W/*", 2);
+            test!(above3, "KWWW...B", "W/*", 3);
+            test!(above4, "WBBBKKKOOOW", "W/*", 9);
+            test!(above5, "GBBBKKKOOOW", "W/*", 11);
+            test!(above6, "GBBBKKKWWW", "W/*", 10);
+            test!(greater_than1, "G", "G>O", 1);
+            test!(greater_than2, "GW", "G>O", 2);
+            test!(greater_than3, "GWO", "G>O", 1);
+            test!(greater_than4, "GWOO", "G>O", 2);
+            test!(greater_than5, "GWOOG", "G>O", 3);
+            test!(greater_than6, "GWOOGG", "G>O", 6);
+            test!(flag_trivial, "KWBOG", "", 5, true);
+            test!(flag_constraint, "KWBOG", "K", 5, true);
+        }
     }
 }
