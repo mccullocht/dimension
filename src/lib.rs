@@ -1084,7 +1084,7 @@ where
         let swapp = partial.iter().position(|d| d == new).unwrap();
         debug_assert!(swapp != 0);
         partial.swap(0, swapp);
-        &partial[1..].sort();
+        let _ = &partial[1..].sort();
         self.fill_state(start + 1, &partial[1..]);
     }
 }
