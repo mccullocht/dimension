@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use dimension::{BoardState, Color, ColorMix, ConstraintSet, Iterators};
+use dimension::{BoardState, Color, ColorMix, ConstraintSet};
+use dimension::permutations::Iterators;
 use itertools::Itertools;
 use pprof::criterion::{Output, PProfProfiler};
 use std::convert::TryFrom;
