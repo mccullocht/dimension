@@ -1,5 +1,66 @@
 use itertools::Itertools;
 use std::collections::VecDeque;
+use std::ops::{Deref, DerefMut};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FixedArrayRep<T: Sized, const N: usize> {
+    Inline([T; N]),
+    Heap(Box<[T]>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixedArray<T: Copy + Default + Sized, const N: usize> {
+    rep: FixedArrayRep<T, N>,
+    len: usize,
+}
+
+impl<T: Copy + Default + Sized, const N: usize> FixedArray<T, N> {
+    pub fn new(k: usize) -> FixedArray<T, N> {
+        if k > N {
+            FixedArray {
+                rep: FixedArrayRep::Heap(vec![T::default(); k].into_boxed_slice()),
+                len: k,
+            }
+        } else {
+            FixedArray {
+                rep: FixedArrayRep::Inline([T::default(); N]),
+                len: k,
+            }
+        }
+    }
+}
+
+impl<T: Copy + Default + Sized, const N: usize> Deref for FixedArray<T, N> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        match &self.rep {
+            FixedArrayRep::Heap(a) => &a[0..self.len],
+            FixedArrayRep::Inline(a) => &a[0..self.len],
+        }
+    }
+}
+
+impl<T: Copy + Default + Sized, const N: usize> DerefMut for FixedArray<T, N> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        match &mut self.rep {
+            FixedArrayRep::Heap(a) => &mut a[0..self.len],
+            FixedArrayRep::Inline(a) => &mut a[0..self.len],
+        }
+    }
+}
+
+impl<T: PartialEq<U> + Copy + Default + Sized, U, const M: usize, const N: usize>
+    PartialEq<[U; M]> for FixedArray<T, N>
+{
+    fn eq(&self, other: &[U; M]) -> bool {
+        if self.len == M {
+            &self.deref() == other
+        } else {
+            false
+        }
+    }
+}
 
 // TODO(trevorm): enum representation for initial + in flight.
 #[derive(Clone, Debug)]
@@ -11,7 +72,7 @@ pub struct UniquePermutations<I: Iterator> {
 impl<I> UniquePermutations<I>
 where
     I: Iterator,
-    I::Item: Copy + Ord,
+    I::Item: Copy + Default + Ord,
 {
     pub fn new(iter: I, k: usize) -> UniquePermutations<I> {
         let mut values = iter.take(k).collect_vec();
@@ -37,17 +98,19 @@ where
         }
     }
 
-    fn value(&self) -> Option<Vec<I::Item>> {
-        self.partial_value(0)
-    }
-
-    fn partial_value(&self, start: usize) -> Option<Vec<I::Item>> {
-        let mut v = Vec::with_capacity(self.state.len() - start);
-        for p in self.state.iter().skip(start) {
+    fn value(&self) -> Option<FixedArray<I::Item, 16>> {
+        let mut v = FixedArray::new(self.state.len());
+        for (p, out) in self.state.iter().zip(v.iter_mut()) {
             let item = p.front()?;
-            v.push(*item);
+            *out = *item;
         }
         Some(v)
+    }
+
+    fn fill_partial_value(&self, start: usize, values: &mut [I::Item]) {
+        for (p, o) in self.state.iter().skip(start).zip(values.iter_mut()) {
+            *o = *p.front().unwrap();
+        }
     }
 
     fn advance(&mut self) {
@@ -62,23 +125,23 @@ where
         };
         debug_assert!(start < self.state.len() - 1);
         debug_assert!(self.state[start].len() >= 2);
-        let mut partial = self.partial_value(start).unwrap();
-        self.state[start].pop_front();
+        let mut buf = FixedArray::<I::Item, 16>::new(self.state.len() - (start + 1));
+        self.fill_partial_value(start + 1, &mut buf);
+        let partial = &mut buf[..(self.state.len() - (start + 1))];
+        let old = self.state[start].pop_front().unwrap();
         let new = self.state[start].front().unwrap();
-        let swapp = partial.iter().position(|d| d == new).unwrap();
-        debug_assert!(swapp != 0);
-        partial.swap(0, swapp);
-        let _ = &partial[1..].sort();
-        self.fill_state(start + 1, &partial[1..]);
+        partial[partial.iter().position(|d| d == new).unwrap()] = old;
+        partial.sort();
+        self.fill_state(start + 1, &partial);
     }
 }
 
 impl<I> Iterator for UniquePermutations<I>
 where
     I: Iterator,
-    I::Item: Copy + Ord,
+    I::Item: Copy + Default + Ord + Sized,
 {
-    type Item = Vec<I::Item>;
+    type Item = FixedArray<I::Item, 16>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let v = self.value()?;
@@ -91,7 +154,7 @@ pub trait Iterators: Iterator {
     fn unique_permutations(self, k: usize) -> UniquePermutations<Self>
     where
         Self: Sized,
-        Self::Item: Copy + Ord,
+        Self::Item: Copy + Default + Ord,
     {
         UniquePermutations::<Self>::new(self, k)
     }

@@ -5,7 +5,7 @@ extern crate lazy_static;
 
 pub mod permutations;
 
-use crate::permutations::Iterators;
+use crate::permutations::{FixedArray, Iterators};
 use itertools::Itertools;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
@@ -986,7 +986,7 @@ pub struct BoardStateAdaptor<I: Iterator> {
 
 impl<I> Iterator for BoardStateAdaptor<I>
 where
-    I: Iterator<Item = Vec<Option<Color>>>,
+    I: Iterator<Item = FixedArray<Option<Color>, 16>>,
 {
     type Item = BoardState;
 
@@ -995,9 +995,8 @@ where
             match self.iter.next() {
                 None => return None,
                 Some(p) => {
-                    let board = BoardState::with_positions_and_mix(&p, &self.mix);
-                    if board.is_ok() {
-                        return board.ok();
+                    if let Ok(board) = BoardState::with_positions_and_mix(&p, &self.mix) {
+                        return Some(board);
                     }
                 }
             }
@@ -1008,7 +1007,7 @@ where
 pub trait BoardStateIterator: Iterator {
     fn as_board_state(self, mix: ColorMix) -> BoardStateAdaptor<Self>
     where
-        Self: Sized + Iterator<Item = Vec<Option<Color>>>,
+        Self: Sized + Iterator<Item = FixedArray<Option<Color>, 16>>,
     {
         BoardStateAdaptor {
             iter: self,
@@ -1017,7 +1016,7 @@ pub trait BoardStateIterator: Iterator {
     }
 }
 
-impl<I: Iterator<Item = Vec<Option<Color>>>> BoardStateIterator for I {}
+impl<I: Iterator<Item = FixedArray<Option<Color>, 16>>> BoardStateIterator for I {}
 
 mod test {
     #[allow(unused_imports)]
