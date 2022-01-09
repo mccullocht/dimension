@@ -1,7 +1,71 @@
 use itertools::Itertools;
-use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 
+#[derive(Clone, Copy, Debug)]
+pub struct BitSet64(u64);
+
+impl BitSet64 {
+    #[inline]
+    pub fn front(&self) -> Option<usize> {
+        if self.0 > 0 {
+            Some(self.0.trailing_zeros() as usize)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    #[inline]
+    pub fn pop_front(&mut self) -> Option<usize> {
+        let idx = self.front()?;
+        self.0 ^= 1 << idx;
+        Some(idx)
+    }
+
+    #[inline]
+    pub fn set(&mut self, idx: usize) {
+        self.0 |= 1 << idx;
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.0 = 0;
+    }
+}
+
+impl Default for BitSet64 {
+    #[inline]
+    fn default() -> BitSet64 {
+        BitSet64(0)
+    }
+}
+
+impl From<u64> for BitSet64 {
+    #[inline]
+    fn from(v: u64) -> BitSet64 {
+        BitSet64(v)
+    }
+}
+
+impl Iterator for BitSet64 {
+    type Item = usize;
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        if self.0 != 0 {
+            let i = self.0.trailing_zeros();
+            self.0 ^= 1 << i;
+            Some(i as usize)
+        } else {
+            None
+        }
+    }
+}
+
+// TODO(trevorm): replace this with SmallVec
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FixedArrayRep<T: Sized, const N: usize> {
     Inline([T; N]),
@@ -50,8 +114,8 @@ impl<T: Copy + Default + Sized, const N: usize> DerefMut for FixedArray<T, N> {
     }
 }
 
-impl<T: PartialEq<U> + Copy + Default + Sized, U, const M: usize, const N: usize>
-    PartialEq<[U; M]> for FixedArray<T, N>
+impl<T: PartialEq<U> + Copy + Default + Sized, U, const M: usize, const N: usize> PartialEq<[U; M]>
+    for FixedArray<T, N>
 {
     fn eq(&self, other: &[U; M]) -> bool {
         if self.len == M {
@@ -62,12 +126,17 @@ impl<T: PartialEq<U> + Copy + Default + Sized, U, const M: usize, const N: usize
     }
 }
 
-// TODO(trevorm): enum representation for initial + in flight.
-// TODO(trevorm): work with indices instead of values. We may be able to flatten
-// the VecDeque into a BitSet64.
+#[derive(Clone, Debug)]
+enum UniquePermutationRep {
+    Inflight,
+    Done,
+}
+
 #[derive(Clone, Debug)]
 pub struct UniquePermutations<I: Iterator> {
-    state: Vec<VecDeque<I::Item>>,
+    rep: UniquePermutationRep,
+    unique_values: Vec<I::Item>,
+    index_state: Vec<BitSet64>,
 }
 
 // TODO(trevorm): make this all a little less panick-y.
@@ -79,62 +148,69 @@ where
     pub fn new(iter: I, k: usize) -> UniquePermutations<I> {
         let mut values = iter.take(k).collect_vec();
         values.sort();
-        debug_assert!(k <= values.len());
+
+        let mut unique_values = Vec::with_capacity(values.len());
+        unique_values.push(values[0]);
+        let mut indices = vec![0; values.len()];
+        for (v, i) in values.iter().zip(indices.iter_mut()).skip(1) {
+            if unique_values.last().unwrap() != v {
+                unique_values.push(*v);
+            }
+            *i = unique_values.len() - 1;
+        }
+
         let mut p = UniquePermutations {
-            state: vec![VecDeque::with_capacity(k); k],
+            rep: UniquePermutationRep::Inflight,
+            unique_values: unique_values,
+            index_state: vec![BitSet64::default(); values.len()],
         };
-        p.fill_state(0, &values);
+        p.fill_index_state(0, &indices);
         p
     }
 
-    fn fill_state(&mut self, start: usize, mut values: &[I::Item]) {
-        debug_assert_eq!(values.len(), self.state.len() - start);
-        for i in start..self.state.len() {
-            self.state[i].clear();
-            for v in values.iter() {
-                if self.state[i].back() != Some(v) {
-                    self.state[i].push_back(*v)
-                }
+    fn fill_index_state(&mut self, start: usize, indices: &[usize]) {
+        debug_assert_eq!(indices.len(), self.index_state.len() - start);
+        for (i, s) in self.index_state.iter_mut().skip(start).enumerate() {
+            s.clear();
+            for idx in indices.iter().skip(i) {
+                s.set(*idx);
             }
-            values = &values[1..];
         }
     }
 
     fn value(&self) -> Option<FixedArray<I::Item, 16>> {
-        let mut v = FixedArray::new(self.state.len());
-        for (p, out) in self.state.iter().zip(v.iter_mut()) {
-            let item = p.front()?;
-            *out = *item;
-        }
-        Some(v)
-    }
-
-    fn fill_partial_value(&self, start: usize, values: &mut [I::Item]) {
-        for (p, o) in self.state.iter().skip(start).zip(values.iter_mut()) {
-            *o = *p.front().unwrap();
+        match &self.rep {
+            UniquePermutationRep::Inflight => {
+                let mut v = FixedArray::new(self.index_state.len());
+                for (i, o) in self.index_state.iter().zip(v.iter_mut()) {
+                    *o = self.unique_values[i.front().unwrap()];
+                }
+                Some(v)
+            }
+            UniquePermutationRep::Done => None,
         }
     }
 
     fn advance(&mut self) {
-        let start = match self.state.iter().rposition(|s| s.len() > 1) {
+        let start = match self.index_state.iter().rposition(|s| s.len() > 1) {
             Some(p) => p,
             None => {
-                // This is the termination condition -- if all the state elements have a single
-                // entry then no more permutations can be generated.
-                self.state[0].clear();
+                self.rep = UniquePermutationRep::Done;
                 return;
             }
         };
-        debug_assert!(start < self.state.len() - 1);
-        debug_assert!(self.state[start].len() >= 2);
-        let mut buf = FixedArray::<I::Item, 16>::new(self.state.len() - (start + 1));
-        self.fill_partial_value(start + 1, &mut buf);
-        let partial = &mut buf[..(self.state.len() - (start + 1))];
-        let old = self.state[start].pop_front().unwrap();
-        let new = self.state[start].front().unwrap();
-        partial[partial.iter().position(|d| d == new).unwrap()] = old;
+        debug_assert!(start < self.index_state.len() - 1);
+        debug_assert!(self.index_state[start].len() >= 2);
+        let mut partial = FixedArray::<usize, 16>::new(self.index_state.len() - (start + 1));
+        for (i, o) in self.index_state.iter().skip(start + 1).zip(partial.iter_mut()) {
+            *o = i.front().unwrap();
+        }
+        let old = self.index_state[start].pop_front().unwrap();
+        let new = self.index_state[start].front().unwrap();
+        let pos = partial.iter().position(|d| *d == new).unwrap();
+        partial[pos] = old;
         partial.sort();
-        self.fill_state(start + 1, &partial);
+        self.fill_index_state(start + 1, &partial);
     }
 }
 

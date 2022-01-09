@@ -13,9 +13,9 @@ structopt = "0.3.25"
 
 [dev-dependencies]
 criterion = "0.3.5"
-pprof = { version = "0.5.0", features = ["criterion", "flamegraph", "protobuf"] }
+pprof = { version = "0.6.2", features = ["criterion", "flamegraph"] }
 
-[profile.bench.build-override]
+[profile.bench]
 debug = 1
 
 [[bench]]

@@ -5,7 +5,7 @@ extern crate lazy_static;
 
 pub mod permutations;
 
-use crate::permutations::{FixedArray, Iterators};
+use crate::permutations::{BitSet64, FixedArray, Iterators};
 use itertools::Itertools;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
@@ -79,27 +79,6 @@ const BOARD_GRAPH: [PositionNode; NUM_POSITIONS] = [
         adjacent: 0b01110000000,
     },
 ];
-
-struct BitSet64(u64);
-
-impl Iterator for BitSet64 {
-    type Item = usize;
-    fn next(&mut self) -> Option<usize> {
-        if self.0 != 0 {
-            let i = self.0.trailing_zeros();
-            self.0 ^= 1 << i;
-            Some(i as usize)
-        } else {
-            None
-        }
-    }
-}
-
-impl From<u64> for BitSet64 {
-    fn from(v: u64) -> BitSet64 {
-        BitSet64(v)
-    }
-}
 
 lazy_static! {
     static ref ADJACENCY_SETS: Vec<u16> = {
