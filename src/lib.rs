@@ -602,10 +602,10 @@ impl ColorMix {
     // Returns an upper bound of the number of matching constraints based entirely on the
     // mix of colors used.
     pub fn approximate_matching_constraints(&self, constraints: &[Constraint]) -> usize {
-        return constraints
+        constraints
             .iter()
             .map(|&c| self.matches_constraint(&c))
-            .sum();
+            .sum()
     }
 
     fn matches_constraint(&self, constraint: &Constraint) -> usize {
@@ -873,11 +873,10 @@ impl BoardState {
     }
 
     pub fn score(&self, constraints: &ConstraintSet) -> BoardScore {
-        let matching = constraints
-            .scoring_constraints()
-            .iter()
-            .map(|c| self.matches_constraint(c))
-            .sum();
+        let mut matching = 0;
+        for c in constraints.scoring_constraints() {
+            matching += self.matches_constraint(c);
+        }
         constraints.compute_score(self.num_spheres(), matching, self.has_all_colors)
     }
 
