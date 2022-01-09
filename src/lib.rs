@@ -80,6 +80,44 @@ const BOARD_GRAPH: [PositionNode; NUM_POSITIONS] = [
     },
 ];
 
+struct BitSet64(u64);
+
+impl Iterator for BitSet64 {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        if self.0 != 0 {
+            let i = self.0.trailing_zeros();
+            self.0 ^= 1 << i;
+            Some(i as usize)
+        } else {
+            None
+        }
+    }
+}
+
+impl From<u64> for BitSet64 {
+    fn from(v: u64) -> BitSet64 {
+        BitSet64(v)
+    }
+}
+
+lazy_static! {
+    static ref ADJACENCY_SETS: Vec<u16> = {
+        let mut s = vec![0u16; 1 << NUM_POSITIONS];
+        for (i, o) in s.iter_mut().enumerate() {
+            for p in BitSet64::from(i as u64) {
+                *o |= BOARD_GRAPH[p].adjacent
+            }
+        }
+        s
+    };
+}
+
+fn adjacent_positions(positions: u16) -> u16 {
+    assert!(positions < (1 << NUM_POSITIONS));
+    ADJACENCY_SETS[positions as usize]
+}
+
 const NUM_SPHERE_COLORS: usize = 5;
 #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Color {
@@ -752,11 +790,6 @@ impl ColorBoardArray {
         debug_assert!(i <= 12);
         self.rep |= 1 << (c as usize * 12) + i
     }
-
-    fn or_equal(&mut self, c: Color, v: u16) {
-        debug_assert!(v <= 0xfff);
-        self.rep |= (v as u64) << (c as usize * 12);
-    }
 }
 
 impl Default for ColorBoardArray {
@@ -774,11 +807,12 @@ impl Default for ColorBoardArray {
 // * Validation of the physical board (below op) would be faster.
 // * Creating an object from the representation would probably be faster.
 // There isn't much point to doing this given the speed of the solver.
+// Note that this partially depends on the presence of a movemask instruction
+// that does not exist on arm64.
 type Positions = [Option<Color>; NUM_POSITIONS];
 #[derive(Debug, Eq, PartialEq)]
 pub struct BoardState {
     cpositions: ColorBoardArray,
-    cadjacency: ColorBoardArray,
     positions: u16,
     below: u16,
     has_all_colors: bool,
@@ -815,7 +849,6 @@ impl BoardState {
             match p {
                 Some(c) => {
                     self.cpositions.set_bit(*c, i);
-                    self.cadjacency.or_equal(*c, g.adjacent);
                     self.positions |= 1 << i;
                     self.below |= g.below;
                 }
@@ -847,11 +880,8 @@ impl BoardState {
     }
 
     fn fill_positions_from_bitmap(&self, c: Color, p: &mut Positions) {
-        let mut bitmap = self.cpositions.get(c);
-        while bitmap > 0 {
-            let idx = bitmap.trailing_zeros();
-            p[idx as usize] = Some(c);
-            bitmap &= !(1 << idx);
+        for i in BitSet64::from(self.cpositions.get(c) as u64) {
+            p[i] = Some(c)
         }
     }
 
@@ -877,16 +907,18 @@ impl BoardState {
             Constraint::Adjacent(color1, color2) => {
                 let c1_pos = self.cpositions.get(*color1);
                 let c2_pos = self.cpositions.get(*color2);
+                let c1_adj = adjacent_positions(c1_pos);
+                let c2_adj = adjacent_positions(c2_pos);
                 c1_pos == 0
                     || c2_pos == 0
-                    || (c1_pos & self.cadjacency.get(*color2) == c1_pos
-                        && c2_pos & self.cadjacency.get(*color1) == c2_pos)
+                    || (c1_pos & c2_adj == c1_pos && c2_pos & c1_adj == c2_pos)
             }
             Constraint::NotAdjacent(color1, color2) => {
                 let c1_pos = self.cpositions.get(*color1);
                 let c2_pos = self.cpositions.get(*color2);
-                c1_pos & !self.cadjacency.get(*color2) == c1_pos
-                    && c2_pos & !self.cadjacency.get(*color1) == c2_pos
+                let c1_adj = adjacent_positions(c1_pos);
+                let c2_adj = adjacent_positions(c2_pos);
+                c1_pos & !c2_adj == c1_pos && c2_pos & !c1_adj == c2_pos
             }
             Constraint::Count(count, color) => self.cpositions.count(*color) == *count,
             Constraint::SumCount(color1, color2) => {
@@ -913,7 +945,6 @@ impl Default for BoardState {
     fn default() -> BoardState {
         BoardState {
             cpositions: ColorBoardArray::default(),
-            cadjacency: ColorBoardArray::default(),
             positions: 0,
             below: 0,
             has_all_colors: false,

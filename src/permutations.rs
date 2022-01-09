@@ -63,6 +63,8 @@ impl<T: PartialEq<U> + Copy + Default + Sized, U, const M: usize, const N: usize
 }
 
 // TODO(trevorm): enum representation for initial + in flight.
+// TODO(trevorm): work with indices instead of values. We may be able to flatten
+// the VecDeque into a BitSet64.
 #[derive(Clone, Debug)]
 pub struct UniquePermutations<I: Iterator> {
     state: Vec<VecDeque<I::Item>>,
