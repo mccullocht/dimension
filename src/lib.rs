@@ -80,20 +80,23 @@ const BOARD_GRAPH: [PositionNode; NUM_POSITIONS] = [
     },
 ];
 
-lazy_static! {
-    static ref ADJACENCY_SETS: Vec<u16> = {
-        let mut s = vec![0u16; 1 << NUM_POSITIONS];
-        for (i, o) in s.iter_mut().enumerate() {
-            for p in BitSet64::from(i as u64) {
-                *o |= BOARD_GRAPH[p].adjacent
-            }
+const ADJACENCY_SETS_SIZE: usize = 1 << NUM_POSITIONS;
+const fn make_adjacency_sets() -> [u16; ADJACENCY_SETS_SIZE] {
+    let mut s = [0u16; ADJACENCY_SETS_SIZE];
+    let mut idx: usize = 0;
+    while idx < s.len() {
+        let mut bitset = idx;
+        while bitset != 0 {
+            let p = bitset.trailing_zeros() as usize;
+            s[idx] |= BOARD_GRAPH[p].adjacent;
+            bitset ^= 1 << p;
         }
-        s
-    };
+        idx += 1;
+    }
+    s
 }
-
-fn adjacent_positions(positions: u16) -> u16 {
-    assert!(positions < (1 << NUM_POSITIONS));
+const ADJACENCY_SETS: [u16; ADJACENCY_SETS_SIZE] = make_adjacency_sets();
+const fn adjacent_positions(positions: u16) -> u16 {
     ADJACENCY_SETS[positions as usize]
 }
 
@@ -208,11 +211,7 @@ fn get_valid_constraints() -> impl Iterator<Item = Constraint> {
 
 lazy_static! {
     static ref VALID_CONSTRAINTS: HashSet<Constraint> = {
-        let mut s: HashSet<Constraint> = HashSet::new();
-        for c in get_valid_constraints() {
-            s.insert(c);
-        }
-        s
+        get_valid_constraints().collect::<HashSet<Constraint>>()
     };
 }
 
@@ -277,12 +276,6 @@ impl Constraint {
     }
 }
 
-fn parse_two_colors(one: u8, two: u8) -> Result<(Color, Color), &'static str> {
-    let c1 = Color::try_from(one)?;
-    let c2 = Color::try_from(two)?;
-    return Ok((c1, c2));
-}
-
 impl FromStr for Constraint {
     type Err = &'static str;
 
@@ -293,12 +286,12 @@ impl FromStr for Constraint {
 
         let v: Vec<u8> = s.bytes().collect();
         if v.len() == 1 {
-            let c = Color::try_from(v[0])?;
-            return Ok(Constraint::Count(1, c));
+            return Ok(Constraint::Count(1, Color::try_from(v[0])?));
         }
 
         if v.len() == 2 {
-            let (c1, c2) = parse_two_colors(v[0], v[1])?;
+            let c1 = Color::try_from(v[0])?;
+            let c2 = Color::try_from(v[1])?;
             if c1 == c2 {
                 return Ok(Constraint::Count(2, c1));
             } else {
@@ -310,27 +303,22 @@ impl FromStr for Constraint {
 
         let c = match v[1] {
             b'|' => {
-                let (c1, c2) = parse_two_colors(v[0], v[2])?;
-                Ok(Constraint::Adjacent(c1, c2))
+                Ok(Constraint::Adjacent(Color::try_from(v[0])?, Color::try_from(v[2])?))
             }
             b'x' => {
-                let (c1, c2) = parse_two_colors(v[0], v[2])?;
-                Ok(Constraint::NotAdjacent(c1, c2))
+                Ok(Constraint::NotAdjacent(Color::try_from(v[0])?, Color::try_from(v[2])?))
             }
             b'/' => {
                 if v[0] == b'*' {
-                    let c = Color::try_from(v[2])?;
-                    Ok(Constraint::Below(c))
+                    Ok(Constraint::Below(Color::try_from(v[2])?))
                 } else if v[2] == b'*' {
-                    let c = Color::try_from(v[0])?;
-                    Ok(Constraint::Above(c))
+                    Ok(Constraint::Above(Color::try_from(v[0])?))
                 } else {
                     Err("below/above constraints must have exactly one wildcard [*]")
                 }
             }
             b'>' => {
-                let (c1, c2) = parse_two_colors(v[0], v[2])?;
-                Ok(Constraint::GreaterThan(c1, c2))
+                Ok(Constraint::GreaterThan(Color::try_from(v[0])?, Color::try_from(v[2])?))
             }
             _ => Err("unknown constraint operator"),
         }?;
@@ -589,7 +577,7 @@ impl ColorMix {
     }
 
     pub fn has_all_colors(&self) -> bool {
-        (self.rep & 0x11111 | (self.rep >> 1) & 0x11111).count_ones() == 5
+        (self.rep & 0x11111 | (self.rep >> 1) & 0x11111) == 0x11111
     }
 
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = Color> + 'a {
@@ -715,8 +703,8 @@ pub struct BoardScore {
 impl BoardScore {
     pub fn new(score: usize, flag: bool) -> BoardScore {
         BoardScore {
-            score: score,
-            flag: flag,
+            score,
+            flag,
         }
     }
 }
