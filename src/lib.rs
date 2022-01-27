@@ -210,9 +210,8 @@ fn get_valid_constraints() -> impl Iterator<Item = Constraint> {
 }
 
 lazy_static! {
-    static ref VALID_CONSTRAINTS: HashSet<Constraint> = {
-        get_valid_constraints().collect::<HashSet<Constraint>>()
-    };
+    static ref VALID_CONSTRAINTS: HashSet<Constraint> =
+        get_valid_constraints().collect::<HashSet<Constraint>>();
 }
 
 impl Constraint {
@@ -302,12 +301,14 @@ impl FromStr for Constraint {
         }
 
         let c = match v[1] {
-            b'|' => {
-                Ok(Constraint::Adjacent(Color::try_from(v[0])?, Color::try_from(v[2])?))
-            }
-            b'x' => {
-                Ok(Constraint::NotAdjacent(Color::try_from(v[0])?, Color::try_from(v[2])?))
-            }
+            b'|' => Ok(Constraint::Adjacent(
+                Color::try_from(v[0])?,
+                Color::try_from(v[2])?,
+            )),
+            b'x' => Ok(Constraint::NotAdjacent(
+                Color::try_from(v[0])?,
+                Color::try_from(v[2])?,
+            )),
             b'/' => {
                 if v[0] == b'*' {
                     Ok(Constraint::Below(Color::try_from(v[2])?))
@@ -317,9 +318,10 @@ impl FromStr for Constraint {
                     Err("below/above constraints must have exactly one wildcard [*]")
                 }
             }
-            b'>' => {
-                Ok(Constraint::GreaterThan(Color::try_from(v[0])?, Color::try_from(v[2])?))
-            }
+            b'>' => Ok(Constraint::GreaterThan(
+                Color::try_from(v[0])?,
+                Color::try_from(v[2])?,
+            )),
             _ => Err("unknown constraint operator"),
         }?;
         c.canonicalize().ok_or("Not a valid constraint")
@@ -393,8 +395,8 @@ impl ConstraintSet {
         dropped.sort();
         let dropped_weight = dropped.iter().map(|c| c.weight()).sum::<usize>();
         ConstraintSet {
-            scoring: scoring,
-            dropped: dropped,
+            scoring,
+            dropped,
             total_weight: constraints.len(),
             max_weight: constraints.len() - dropped_weight,
         }
@@ -633,6 +635,12 @@ impl ColorMix {
     }
 }
 
+impl Default for ColorMix {
+    fn default() -> ColorMix {
+        ColorMix { rep: 0, count: 0 }
+    }
+}
+
 impl FromStr for ColorMix {
     type Err = &'static str;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -702,10 +710,7 @@ pub struct BoardScore {
 
 impl BoardScore {
     pub fn new(score: usize, flag: bool) -> BoardScore {
-        BoardScore {
-            score,
-            flag,
-        }
+        BoardScore { score, flag }
     }
 }
 
@@ -779,10 +784,10 @@ impl Default for ColorBoardArray {
 type Positions = [Option<Color>; NUM_POSITIONS];
 #[derive(Debug, Eq, PartialEq)]
 pub struct BoardState {
+    mix: ColorMix,
     cpositions: ColorBoardArray,
     positions: u16,
     below: u16,
-    has_all_colors: bool,
 }
 
 impl BoardState {
@@ -798,10 +803,14 @@ impl BoardState {
         positions: &[Option<Color>],
         mix: &ColorMix,
     ) -> Result<BoardState, &'static str> {
-        let mut board = BoardState::default();
+        let mut board = BoardState {
+            mix: *mix,
+            cpositions: ColorBoardArray::default(),
+            positions: 0,
+            below: 0,
+        };
         board.init(positions.iter());
         if board.positions & board.below == board.below {
-            board.has_all_colors = mix.has_all_colors();
             Ok(board)
         } else {
             Err("Board has empty positions below occupied positions")
@@ -865,7 +874,7 @@ impl BoardState {
         for c in constraints.scoring_constraints() {
             matching += self.matches_constraint(c);
         }
-        constraints.compute_score(self.num_spheres(), matching, self.has_all_colors)
+        constraints.compute_score(self.num_spheres(), matching, self.mix.has_all_colors())
     }
 
     fn matches_constraint(&self, constraint: &Constraint) -> usize {
@@ -886,9 +895,9 @@ impl BoardState {
                 let c2_adj = adjacent_positions(c2_pos);
                 c1_pos & !c2_adj == c1_pos && c2_pos & !c1_adj == c2_pos
             }
-            Constraint::Count(count, color) => self.cpositions.count(*color) == *count,
+            Constraint::Count(count, color) => self.mix.count(*color) == *count,
             Constraint::SumCount(color1, color2) => {
-                self.cpositions.count(*color1) + self.cpositions.count(*color2) == 4
+                self.mix.count(*color1) + self.mix.count(*color2) == 4
             }
             Constraint::Below(color) => {
                 let pos = self.cpositions.get(*color);
@@ -896,7 +905,7 @@ impl BoardState {
             }
             Constraint::Above(color) => self.cpositions.get(*color) & self.below == 0,
             Constraint::GreaterThan(color1, color2) => {
-                self.cpositions.count(*color1) > self.cpositions.count(*color2)
+                self.mix.count(*color1) > self.mix.count(*color2)
             }
         };
         if f {
@@ -910,10 +919,10 @@ impl BoardState {
 impl Default for BoardState {
     fn default() -> BoardState {
         BoardState {
+            mix: ColorMix::default(),
             cpositions: ColorBoardArray::default(),
             positions: 0,
             below: 0,
-            has_all_colors: false,
         }
     }
 }
@@ -969,7 +978,7 @@ impl From<&ColorMix> for BoardState {
         }
         let mut board = BoardState::default();
         board.init(pos.iter());
-        board.has_all_colors = mix.has_all_colors();
+        board.mix = *mix;
         // ColorMix guarantees that we won't have more than 3 of each color, and this arrangement
         // without gaps ensures that the board will be valid.
         board
