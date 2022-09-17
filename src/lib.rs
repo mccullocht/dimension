@@ -754,10 +754,6 @@ impl ColorBoardArray {
         (self.rep >> (c as usize * 12)) as u16 & 0xfff
     }
 
-    fn count(self, c: Color) -> usize {
-        ((self.rep >> (c as usize * 12)) & 0xfff).count_ones() as usize
-    }
-
     fn set_bit(&mut self, c: Color, i: usize) {
         debug_assert!(i <= 12);
         self.rep |= 1 << (c as usize * 12) + i

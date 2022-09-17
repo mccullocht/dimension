@@ -1,8 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use dimension::{BoardState, Color, ColorMix, ConstraintSet};
 use dimension::permutations::Iterators;
+use dimension::{BoardState, Color, ColorMix, ConstraintSet};
 use itertools::Itertools;
-use pprof::criterion::{Output, PProfProfiler};
 use std::convert::TryFrom;
 use std::str::FromStr;
 
@@ -116,13 +115,22 @@ fn bm_permutations(c: &mut Criterion) {
 }
 
 fn bm_unique_permutations(c: &mut Criterion) {
-    let mut it = board_positions().into_iter().unique_permutations(11).cycle();
-    c.bench_function("unique_permutations", |b| b.iter(|| assert!(it.next().is_some())));
+    let mut it = board_positions()
+        .into_iter()
+        .unique_permutations(11)
+        .cycle();
+    c.bench_function("unique_permutations", |b| {
+        b.iter(|| assert!(it.next().is_some()))
+    });
 }
 
-criterion_group! {
-    name = benches;
-    config = Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
-    targets = bm_full_score, bm_create_board, bm_approximate_score, bm_create_mix, bm_permutations, bm_unique_permutations
-}
+criterion_group!(
+    benches,
+    bm_full_score,
+    bm_create_board,
+    bm_approximate_score,
+    bm_create_mix,
+    bm_permutations,
+    bm_unique_permutations
+);
 criterion_main!(benches);
