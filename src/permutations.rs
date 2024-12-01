@@ -20,6 +20,11 @@ impl BitSet64 {
     }
 
     #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline]
     pub fn pop_front(&mut self) -> Option<usize> {
         let idx = self.front()?;
         self.0 ^= 1 << idx;
@@ -119,7 +124,7 @@ impl<T: PartialEq<U> + Copy + Default + Sized, U, const M: usize, const N: usize
 {
     fn eq(&self, other: &[U; M]) -> bool {
         if self.len == M {
-            &self.deref() == other
+            self.deref() == other
         } else {
             false
         }
@@ -161,7 +166,7 @@ where
 
         let mut p = UniquePermutations {
             rep: UniquePermutationRep::Inflight,
-            unique_values: unique_values,
+            unique_values,
             index_state: vec![BitSet64::default(); values.len()],
         };
         p.fill_index_state(0, &indices);
@@ -202,7 +207,12 @@ where
         debug_assert!(start < self.index_state.len() - 1);
         debug_assert!(self.index_state[start].len() >= 2);
         let mut partial = FixedArray::<usize, 16>::new(self.index_state.len() - (start + 1));
-        for (i, o) in self.index_state.iter().skip(start + 1).zip(partial.iter_mut()) {
+        for (i, o) in self
+            .index_state
+            .iter()
+            .skip(start + 1)
+            .zip(partial.iter_mut())
+        {
             *o = i.front().unwrap();
         }
         let old = self.index_state[start].pop_front().unwrap();

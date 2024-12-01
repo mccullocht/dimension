@@ -1,12 +1,9 @@
-#[macro_use]
-extern crate itertools;
-#[macro_use]
-extern crate lazy_static;
-
 pub mod permutations;
 
-use crate::permutations::{BitSet64, FixedArray, Iterators};
+use crate::permutations::{BitSet64, Iterators};
+
 use itertools::Itertools;
+use lazy_static::lazy_static;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
@@ -80,6 +77,28 @@ const BOARD_GRAPH: [PositionNode; NUM_POSITIONS] = [
     },
 ];
 
+const fn make_below_table() -> [u16; 16] {
+    let mut tbl = [0u16; 16];
+    let mut i = 0;
+    while i < tbl.len() {
+        if i & 1 != 0 {
+            tbl[i] |= BOARD_GRAPH[7].below;
+        }
+        if i & 2 != 0 {
+            tbl[i] |= BOARD_GRAPH[8].below;
+        }
+        if i & 4 != 0 {
+            tbl[i] |= BOARD_GRAPH[9].below;
+        }
+        if i & 8 != 0 {
+            tbl[i] |= BOARD_GRAPH[10].below;
+        }
+        i += 1;
+    }
+    tbl
+}
+const BELOW_TABLE: [u16; 16] = make_below_table();
+
 const ADJACENCY_SETS_SIZE: usize = 1 << NUM_POSITIONS;
 const fn make_adjacency_sets() -> [u16; ADJACENCY_SETS_SIZE] {
     let mut s = [0u16; ADJACENCY_SETS_SIZE];
@@ -96,6 +115,7 @@ const fn make_adjacency_sets() -> [u16; ADJACENCY_SETS_SIZE] {
     s
 }
 const ADJACENCY_SETS: [u16; ADJACENCY_SETS_SIZE] = make_adjacency_sets();
+#[inline(always)]
 const fn adjacent_positions(positions: u16) -> u16 {
     ADJACENCY_SETS[positions as usize]
 }
@@ -200,13 +220,13 @@ fn get_valid_constraints() -> impl Iterator<Item = Constraint> {
     ]
     .iter()
     .map(|(c1, c2)| Constraint::GreaterThan(*c1, *c2));
-    return adjacent
+    adjacent
         .chain(not_adjacent)
         .chain(count)
         .chain(sum_count)
         .chain(below)
         .chain(above)
-        .chain(greater_than);
+        .chain(greater_than)
 }
 
 lazy_static! {
@@ -365,10 +385,7 @@ impl ConstraintSet {
         let mut conflict_map: HashMap<Constraint, Vec<Constraint>> =
             HashMap::with_capacity(constraints.len());
         for c in constraints {
-            conflict_map
-                .entry(c.conflict_key())
-                .or_insert(Vec::new())
-                .push(*c);
+            conflict_map.entry(c.conflict_key()).or_default().push(*c);
         }
 
         let mut scoring: Vec<Constraint> = Vec::with_capacity(constraints.len());
@@ -452,7 +469,7 @@ impl ConstraintSet {
             scores.push((k, high_score))
         }
         // Return in descending order by score.
-        scores.sort_by(|(_, a), (_, b)| a.cmp(&b).reverse());
+        scores.sort_by(|(_, a), (_, b)| a.cmp(b).reverse());
         scores
     }
 
@@ -500,10 +517,7 @@ impl FromStr for ConstraintSet {
         if s.is_empty() {
             return Ok(ConstraintSet::with_constraints(&[]));
         }
-        let constraints: Vec<Constraint> = s
-            .split(",")
-            .map(|e| Constraint::from_str(e))
-            .try_collect()?;
+        let constraints: Vec<Constraint> = s.split(",").map(Constraint::from_str).try_collect()?;
         if constraints.iter().unique().count() == constraints.len() {
             Ok(ConstraintSet::with_constraints(&constraints))
         } else {
@@ -512,7 +526,7 @@ impl FromStr for ConstraintSet {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ColorMix {
     // Pack everything into a single u32 containing 5 4-bit values, one entry for each color.
     // 4 bits is enough as we will not process more than 11 input entries. This is a form of
@@ -557,11 +571,16 @@ impl ColorMix {
 
     pub fn all_combinations(num_spheres: usize) -> impl Iterator<Item = ColorMix> {
         ALL_COLORS
-            .iter()
-            .copied()
+            .into_iter()
             .flat_map(|c| iter::repeat(c).take(3))
             .combinations(num_spheres)
-            .as_color_mix()
+            .filter_map(|combo| {
+                if let Ok(mix) = ColorMix::with_colors(&combo) {
+                    Some(mix)
+                } else {
+                    None
+                }
+            })
             .unique()
     }
 
@@ -582,7 +601,7 @@ impl ColorMix {
         (self.rep & 0x11111 | (self.rep >> 1) & 0x11111) == 0x11111
     }
 
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = Color> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = Color> + '_ {
         ALL_COLORS
             .iter()
             .copied()
@@ -594,24 +613,24 @@ impl ColorMix {
     pub fn approximate_matching_constraints(&self, constraints: &[Constraint]) -> usize {
         constraints
             .iter()
-            .map(|&c| self.matches_constraint(&c))
+            .map(|&c| self.matches_constraint(c))
             .sum()
     }
 
-    fn matches_constraint(&self, constraint: &Constraint) -> usize {
+    fn matches_constraint(&self, constraint: Constraint) -> usize {
         let m: bool = match constraint {
             Constraint::Adjacent(color1, color2) => {
                 // If both colors are placed they must be adjacent. Any board with just one color
                 // passes; if the colors are the same there must be 0 or 2+
-                *color1 != *color2 || self.count(*color1) != 1
+                color1 != color2 || self.count(color1) != 1
             }
-            Constraint::Count(count, color) => self.count(*color) == *count,
-            Constraint::SumCount(color1, color2) => self.count(*color1) + self.count(*color2) == 4,
-            Constraint::GreaterThan(color1, color2) => self.count(*color1) > self.count(*color2),
+            Constraint::Count(count, color) => self.count(color) == count,
+            Constraint::SumCount(color1, color2) => self.count(color1) + self.count(color2) == 4,
+            Constraint::GreaterThan(color1, color2) => self.count(color1) > self.count(color2),
             Constraint::Above(color) => {
                 // If a color must be above everything and there are 11 spheres it must be on top
                 // and there must be no other spheres of that color.
-                self.num_spheres() < 11 || self.count(*color) == 1
+                self.num_spheres() < 11 || self.count(color) == 1
             }
             // Approximations of these are too pessimistic given that we are trying
             // to compute an upper bound score. The best approximations only return true
@@ -635,12 +654,6 @@ impl ColorMix {
     }
 }
 
-impl Default for ColorMix {
-    fn default() -> ColorMix {
-        ColorMix { rep: 0, count: 0 }
-    }
-}
-
 impl FromStr for ColorMix {
     type Err = &'static str;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -655,52 +668,11 @@ impl FromStr for ColorMix {
 
 impl fmt::Display for ColorMix {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.iter().map(|c| char::from(c)).collect::<String>()
-        )
+        write!(f, "{}", self.iter().map(char::from).collect::<String>())
     }
 }
 
-pub struct ColorMixAdaptor<I: Iterator> {
-    iter: I,
-}
-
-impl<I> Iterator for ColorMixAdaptor<I>
-where
-    I: Iterator<Item = Vec<Color>>,
-{
-    type Item = ColorMix;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.iter.next() {
-                None => return None,
-                Some(c) => {
-                    let mix = ColorMix::with_colors(&c);
-                    debug_assert!(mix.is_ok());
-                    if mix.is_ok() {
-                        return mix.ok();
-                    }
-                }
-            }
-        }
-    }
-}
-
-pub trait ColorMixIterator: Iterator {
-    fn as_color_mix(self) -> ColorMixAdaptor<Self>
-    where
-        Self: Sized + Iterator<Item = Vec<Color>>,
-    {
-        ColorMixAdaptor { iter: self }
-    }
-}
-
-impl<I: Iterator<Item = Vec<Color>>> ColorMixIterator for I {}
-
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Default, Debug, Eq, PartialEq)]
 pub struct BoardScore {
     // Score in [0,11]
     pub score: usize,
@@ -714,15 +686,6 @@ impl BoardScore {
     }
 }
 
-impl Default for BoardScore {
-    fn default() -> BoardScore {
-        BoardScore {
-            score: 0,
-            flag: false,
-        }
-    }
-}
-
 impl Ord for BoardScore {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.score
@@ -733,7 +696,7 @@ impl Ord for BoardScore {
 
 impl PartialOrd for BoardScore {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(&other))
+        Some(self.cmp(other))
     }
 }
 
@@ -744,25 +707,17 @@ impl fmt::Display for BoardScore {
 }
 
 // Represents an array of 5 11-bit values, one for each color.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ColorBoardArray {
-    rep: u64,
-}
+#[derive(Default, Clone, Copy, Debug, Eq, PartialEq)]
+struct ColorBoardArray(u64);
 
 impl ColorBoardArray {
     fn get(self, c: Color) -> u16 {
-        (self.rep >> (c as usize * 12)) as u16 & 0xfff
+        (self.0 >> (c as usize * 12)) as u16 & 0xfff
     }
 
     fn set_bit(&mut self, c: Color, i: usize) {
         debug_assert!(i <= 12);
-        self.rep |= 1 << (c as usize * 12) + i
-    }
-}
-
-impl Default for ColorBoardArray {
-    fn default() -> ColorBoardArray {
-        ColorBoardArray { rep: 0 }
+        self.0 |= 1 << ((c as usize * 12) + i)
     }
 }
 
@@ -778,11 +733,10 @@ impl Default for ColorBoardArray {
 // Note that this partially depends on the presence of a movemask instruction
 // that does not exist on arm64.
 type Positions = [Option<Color>; NUM_POSITIONS];
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Default, Debug, Eq, PartialEq)]
 pub struct BoardState {
     mix: ColorMix,
     cpositions: ColorBoardArray,
-    positions: u16,
     below: u16,
 }
 
@@ -791,7 +745,7 @@ impl BoardState {
     pub fn with_positions(positions: &[Option<Color>]) -> Result<BoardState, &'static str> {
         // Computing ColorMix checks that spheres per color <=3
         let mix = ColorMix::with_colors(&positions.iter().filter_map(|c| *c).collect_vec())?;
-        BoardState::with_positions_and_mix(&positions, &mix)
+        BoardState::with_positions_and_mix(positions, &mix)
     }
 
     // Create a BoardState with the input positions. Returns None if the board is not valid.
@@ -802,37 +756,32 @@ impl BoardState {
         let mut board = BoardState {
             mix: *mix,
             cpositions: ColorBoardArray::default(),
-            positions: 0,
             below: 0,
         };
-        board.init(positions.iter());
-        if board.positions & board.below == board.below {
+        let posmap = board.init(positions.iter().copied());
+        if posmap & board.below == board.below {
             Ok(board)
         } else {
             Err("Board has empty positions below occupied positions")
         }
     }
 
-    fn init<'a, I>(&mut self, positions: I)
-    where
-        I: Iterator<Item = &'a Option<Color>>,
-    {
-        for (i, p, g) in izip!((0..NUM_POSITIONS), positions, BOARD_GRAPH.iter()) {
-            match p {
-                Some(c) => {
-                    self.cpositions.set_bit(*c, i);
-                    self.positions |= 1 << i;
-                    self.below |= g.below;
-                }
-                None => {}
+    #[inline(always)]
+    fn init(&mut self, positions: impl Iterator<Item = Option<Color>>) -> u16 {
+        let mut posmap = 0;
+        for (i, p) in positions.enumerate() {
+            if let Some(c) = p {
+                self.cpositions.set_bit(c, i);
+                posmap |= 1 << i;
             }
         }
+        self.below = BELOW_TABLE[posmap as usize >> 7];
+        posmap
     }
 
     // Produces all BoardState permutation from a single ColorMix.
     pub fn permutations_from_color_mix(mix: &ColorMix) -> impl Iterator<Item = BoardState> {
-        let positions: Vec<Option<Color>> =
-            BoardState::from(mix).positions().iter().copied().collect();
+        let positions: Vec<Option<Color>> = BoardState::from(mix).positions().to_vec();
         // If we have less than 11 spheres we may be able to run fewer permutations on the
         // beginning of the array ("lower" spheres), which will skip permutations that
         // produce invalid board states.
@@ -844,23 +793,25 @@ impl BoardState {
         positions
             .into_iter()
             .unique_permutations(p)
-            .as_board_state(*mix)
+            .filter_map(|positions| {
+                if let Ok(board) = BoardState::with_positions(&positions) {
+                    Some(board)
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn num_spheres(&self) -> usize {
-        self.positions.count_ones() as usize
-    }
-
-    fn fill_positions_from_bitmap(&self, c: Color, p: &mut Positions) {
-        for i in BitSet64::from(self.cpositions.get(c) as u64) {
-            p[i] = Some(c)
-        }
+        self.cpositions.0.count_ones() as usize
     }
 
     fn positions(&self) -> Positions {
         let mut p: Positions = [None; NUM_POSITIONS];
-        for c in ALL_COLORS.iter() {
-            self.fill_positions_from_bitmap(*c, &mut p);
+        for c in ALL_COLORS.into_iter() {
+            for i in BitSet64::from(self.cpositions.get(c) as u64) {
+                p[i] = Some(c)
+            }
         }
         p
     }
@@ -868,57 +819,52 @@ impl BoardState {
     pub fn score(&self, constraints: &ConstraintSet) -> BoardScore {
         let mut matching = 0;
         for c in constraints.scoring_constraints() {
-            matching += self.matches_constraint(c);
+            matching += self.matches_constraint(*c);
         }
         constraints.compute_score(self.num_spheres(), matching, self.mix.has_all_colors())
     }
 
-    fn matches_constraint(&self, constraint: &Constraint) -> usize {
+    fn matches_constraint(&self, constraint: Constraint) -> usize {
         let f: bool = match constraint {
             Constraint::Adjacent(color1, color2) => {
-                let c1_pos = self.cpositions.get(*color1);
-                let c2_pos = self.cpositions.get(*color2);
-                let c1_adj = adjacent_positions(c1_pos);
-                let c2_adj = adjacent_positions(c2_pos);
-                c1_pos == 0
-                    || c2_pos == 0
-                    || (c1_pos & c2_adj == c1_pos && c2_pos & c1_adj == c2_pos)
+                let c1_pos = self.cpositions.get(color1);
+                let c2_pos = self.cpositions.get(color2);
+                if c1_pos == 0 || c2_pos == 0 {
+                    true
+                } else {
+                    let c1_adj = adjacent_positions(c1_pos);
+                    let c2_adj = adjacent_positions(c2_pos);
+                    c1_pos & c2_adj == c1_pos && c2_pos & c1_adj == c2_pos
+                }
             }
             Constraint::NotAdjacent(color1, color2) => {
-                let c1_pos = self.cpositions.get(*color1);
-                let c2_pos = self.cpositions.get(*color2);
-                let c1_adj = adjacent_positions(c1_pos);
-                let c2_adj = adjacent_positions(c2_pos);
-                c1_pos & !c2_adj == c1_pos && c2_pos & !c1_adj == c2_pos
+                let c1_pos = self.cpositions.get(color1);
+                let c2_pos = self.cpositions.get(color2);
+                if c1_pos == 0 || c2_pos == 0 {
+                    true
+                } else {
+                    let c1_adj = adjacent_positions(c1_pos);
+                    let c2_adj = adjacent_positions(c2_pos);
+                    c1_pos & !c2_adj == c1_pos && c2_pos & !c1_adj == c2_pos
+                }
             }
-            Constraint::Count(count, color) => self.mix.count(*color) == *count,
+            Constraint::Count(count, color) => self.mix.count(color) == count,
             Constraint::SumCount(color1, color2) => {
-                self.mix.count(*color1) + self.mix.count(*color2) == 4
+                self.mix.count(color1) + self.mix.count(color2) == 4
             }
             Constraint::Below(color) => {
-                let pos = self.cpositions.get(*color);
+                let pos = self.cpositions.get(color);
                 pos & self.below == pos
             }
-            Constraint::Above(color) => self.cpositions.get(*color) & self.below == 0,
+            Constraint::Above(color) => self.cpositions.get(color) & self.below == 0,
             Constraint::GreaterThan(color1, color2) => {
-                self.mix.count(*color1) > self.mix.count(*color2)
+                self.mix.count(color1) > self.mix.count(color2)
             }
         };
         if f {
             constraint.weight()
         } else {
             0
-        }
-    }
-}
-
-impl Default for BoardState {
-    fn default() -> BoardState {
-        BoardState {
-            mix: ColorMix::default(),
-            cpositions: ColorBoardArray::default(),
-            positions: 0,
-            below: 0,
         }
     }
 }
@@ -973,52 +919,13 @@ impl From<&ColorMix> for BoardState {
             *o = Some(i)
         }
         let mut board = BoardState::default();
-        board.init(pos.iter());
+        board.init(pos.iter().copied());
         board.mix = *mix;
         // ColorMix guarantees that we won't have more than 3 of each color, and this arrangement
         // without gaps ensures that the board will be valid.
         board
     }
 }
-
-pub struct BoardStateAdaptor<I: Iterator> {
-    iter: I,
-    mix: ColorMix,
-}
-
-impl<I> Iterator for BoardStateAdaptor<I>
-where
-    I: Iterator<Item = FixedArray<Option<Color>, 16>>,
-{
-    type Item = BoardState;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.iter.next() {
-                None => return None,
-                Some(p) => {
-                    if let Ok(board) = BoardState::with_positions_and_mix(&p, &self.mix) {
-                        return Some(board);
-                    }
-                }
-            }
-        }
-    }
-}
-
-pub trait BoardStateIterator: Iterator {
-    fn as_board_state(self, mix: ColorMix) -> BoardStateAdaptor<Self>
-    where
-        Self: Sized + Iterator<Item = FixedArray<Option<Color>, 16>>,
-    {
-        BoardStateAdaptor {
-            iter: self,
-            mix: mix,
-        }
-    }
-}
-
-impl<I: Iterator<Item = FixedArray<Option<Color>, 16>>> BoardStateIterator for I {}
 
 mod test {
     #[allow(unused_imports)]
