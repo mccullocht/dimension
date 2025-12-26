@@ -8,7 +8,6 @@ use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::fmt;
-use std::iter;
 use std::str::FromStr;
 
 // Metadata about outbound edges for a node in the 11 node board graph.
@@ -357,9 +356,7 @@ impl fmt::Display for Constraint {
                 write!(
                     f,
                     "{}",
-                    std::iter::repeat(char::from(*c))
-                        .take(*n)
-                        .collect::<String>()
+                    std::iter::repeat_n(char::from(*c), *n).collect::<String>()
                 )
             }
             Constraint::SumCount(c1, c2) => write!(f, "{}{}", char::from(*c1), char::from(*c2)),
@@ -436,11 +433,7 @@ impl ConstraintSet {
     ) -> BoardScore {
         let penalty = (self.total_weight - matching_weight) * 2;
         BoardScore {
-            score: if num_spheres > penalty {
-                num_spheres - penalty
-            } else {
-                0
-            },
+            score: num_spheres.saturating_sub(penalty),
             flag: penalty == 0 && has_all_colors,
         }
     }
@@ -572,15 +565,9 @@ impl ColorMix {
     pub fn all_combinations(num_spheres: usize) -> impl Iterator<Item = ColorMix> {
         ALL_COLORS
             .into_iter()
-            .flat_map(|c| iter::repeat(c).take(3))
+            .flat_map(|c| std::iter::repeat_n(c, 3))
             .combinations(num_spheres)
-            .filter_map(|combo| {
-                if let Ok(mix) = ColorMix::with_colors(&combo) {
-                    Some(mix)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|combo| ColorMix::with_colors(&combo).ok())
             .unique()
     }
 
@@ -605,7 +592,7 @@ impl ColorMix {
         ALL_COLORS
             .iter()
             .copied()
-            .flat_map(move |c| iter::repeat(c).take(self.count(c)))
+            .flat_map(move |c| std::iter::repeat_n(c, self.count(c)))
     }
 
     // Returns an upper bound of the number of matching constraints based entirely on the
@@ -793,13 +780,7 @@ impl BoardState {
         positions
             .into_iter()
             .unique_permutations(p)
-            .filter_map(|positions| {
-                if let Ok(board) = BoardState::with_positions(&positions) {
-                    Some(board)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|positions| BoardState::with_positions(&positions).ok())
     }
 
     pub fn num_spheres(&self) -> usize {
@@ -908,7 +889,7 @@ impl fmt::Display for BoardState {
             }
         }
         let r: String = s.iter().collect();
-        write!(f, "{}", r)
+        write!(f, "{r}")
     }
 }
 

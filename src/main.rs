@@ -13,8 +13,7 @@ fn main() {
     let opt = Opt::from_args();
     for c in opt.constraints.dropped_constraints() {
         println!(
-            "Dropping conflicting constraint '{}'; taking 2 point/no flag penalty.",
-            c
+            "Dropping conflicting constraint '{c}'; taking 2 point/no flag penalty."
         );
     }
     match opt.board {
@@ -23,7 +22,7 @@ fn main() {
         }
         None => {
             let (board, score) = opt.constraints.solve();
-            println!("{} {}", board, score)
+            println!("{board} {score}")
         }
     }
 }
