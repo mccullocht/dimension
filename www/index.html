@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dimension Solver</title>
+    <link rel="stylesheet" href="./style.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>Dimension Solver</h1>
+        <p>Enter your constraints found on the dimension task cards</p>
+      </header>
+      
+      <main>
+        <section class="input-section">
+          <div class="input-group">
+            <label for="constraints">Constraints</label>
+            <input type="text" id="constraints" placeholder="e.g. K|W, 3B, G>O" autofocus />
+            <span class="hint">Format: K (Black), W (White), B (Blue), G (Green), O (Orange). Separated by commas.</span>
+          </div>
+          <button id="solve-btn">Solve Puzzle</button>
+        </section>
+
+        <section class="results-section" id="results-section" style="display: none;">
+          <div class="stats">
+            <div class="stat-card">
+              <span class="stat-label">Score</span>
+              <span class="stat-value" id="score-value">0</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Bonus</span>
+              <span class="stat-value" id="bonus-value">No</span>
+            </div>
+          </div>
+          
+          <div class="visualization">
+            <div class="pyramid-container" id="pyramid">
+              <!-- Pyramid spheres will be injected here -->
+            </div>
+          </div>
+          
+          <div id="error-message" class="error"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

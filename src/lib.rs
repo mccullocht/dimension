@@ -1,4 +1,5 @@
 pub mod permutations;
+pub mod wasm;
 
 use crate::permutations::{BitSet64, Iterators};
 
@@ -787,7 +788,7 @@ impl BoardState {
         self.cpositions.0.count_ones() as usize
     }
 
-    fn positions(&self) -> Positions {
+    pub fn positions(&self) -> Positions {
         let mut p: Positions = [None; NUM_POSITIONS];
         for c in ALL_COLORS.into_iter() {
             for i in BitSet64::from(self.cpositions.get(c) as u64) {

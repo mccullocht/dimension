@@ -1,0 +1,234 @@
+:root {
+  --bg-color: #0f172a;
+  --text-color: #f8fafc;
+  --accent-color: #3b82f6;
+  --accent-glow: rgba(59, 130, 246, 0.5);
+  --glass-bg: rgba(30, 41, 59, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --container-width: 800px;
+  --sphere-size: 60px;
+}
+
+body {
+  margin: 0;
+  font-family: 'Outfit', sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-color);
+  background-image: 
+    radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.15) 0%, transparent 20%),
+    radial-gradient(circle at 90% 80%, rgba(139, 92, 246, 0.15) 0%, transparent 20%);
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+#app {
+  width: 100%;
+  max-width: var(--container-width);
+  padding: 2rem;
+}
+
+header {
+  text-align: center;
+  margin-bottom: 3rem;
+  animation: fadeInDown 0.8s ease-out;
+}
+
+h1 {
+  font-size: 3rem;
+  font-weight: 600;
+  margin: 0;
+  background: linear-gradient(to right, #60a5fa, #c084fc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  letter-spacing: -0.02em;
+}
+
+p {
+  color: #94a3b8;
+  font-size: 1.1rem;
+  margin-top: 0.5rem;
+}
+
+.input-section {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  padding: 2rem;
+  border-radius: 1.5rem;
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+  display: flex;
+  gap: 1rem;
+  align-items: flex-end;
+  margin-bottom: 2rem;
+  animation: fadeInUp 0.8s ease-out 0.2s backwards;
+}
+
+.input-group {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #cbd5e1;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+input {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--glass-border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  color: white;
+  font-size: 1.1rem;
+  font-family: inherit;
+  transition: all 0.3s ease;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.hint {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+button {
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  color: white;
+  border: none;
+  padding: 1rem 2rem;
+  border-radius: 0.75rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  height: 3.5rem; /* Match input height roughly */
+  margin-bottom: 1.6rem; /* Align with input */
+}
+
+button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px -5px var(--accent-glow);
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+.results-section {
+  animation: fadeInUp 0.8s ease-out 0.4s backwards;
+}
+
+.stats {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.stat-card {
+  flex: 1;
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  padding: 1.5rem;
+  border-radius: 1rem;
+  text-align: center;
+}
+
+.stat-label {
+  display: block;
+  font-size: 0.9rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  margin-bottom: 0.5rem;
+}
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: white;
+}
+
+.visualization {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 1.5rem;
+  padding: 3rem;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 400px;
+  position: relative;
+  overflow: hidden;
+}
+
+.pyramid-container {
+  position: relative;
+  width: 300px;
+  height: 300px;
+  /* Simple 2D representation layout for now, or 3D via CSS transform */
+  transform-style: preserve-3d;
+  transform: rotateX(60deg) rotateZ(45deg); 
+  /* This is a naive simplistic 3D attempt. 
+     Better to just do flat 2D layout based on levels. 
+     Let's stick to 2D stacked layout for clarity, or a nice CSS grid. */
+     transform: none; /* Reset */
+     display: grid;
+     grid-template-rows: repeat(3, 1fr);
+     justify-items: center;
+}
+
+/* Custom layout for pyramid levels */
+.level-0 { display: flex; gap: 5px; margin-top: -15px; z-index: 3; }
+.level-1 { display: flex; gap: 5px; margin-top: -15px; z-index: 2; }
+.level-2 { display: flex; gap: 5px; z-index: 1; }
+
+.sphere {
+  width: var(--sphere-size);
+  height: var(--sphere-size);
+  border-radius: 50%;
+  box-shadow: 
+    inset -10px -10px 20px rgba(0,0,0,0.5),
+    inset 10px 10px 20px rgba(255,255,255,0.4),
+    0 10px 20px rgba(0,0,0,0.3);
+  transition: all 0.5s ease;
+  position: relative;
+}
+
+.sphere.K { background-color: #1e293b; background-image: radial-gradient(circle at 30% 30%, #334155, #020617); }
+.sphere.W { background-color: #f8fafc; background-image: radial-gradient(circle at 30% 30%, #ffffff, #cbd5e1); }
+.sphere.B { background-color: #3b82f6; background-image: radial-gradient(circle at 30% 30%, #60a5fa, #1d4ed8); }
+.sphere.G { background-color: #22c55e; background-image: radial-gradient(circle at 30% 30%, #4ade80, #15803d); }
+.sphere.O { background-color: #f97316; background-image: radial-gradient(circle at 30% 30%, #fb923c, #c2410c); }
+
+.error {
+  color: #ef4444;
+  text-align: center;
+  margin-top: 1rem;
+  padding: 1rem;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 0.5rem;
+  display: none;
+}
+
+@keyframes fadeInDown {
+  from { opacity: 0; transform: translateY(-20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
